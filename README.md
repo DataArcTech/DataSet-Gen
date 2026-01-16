@@ -1,5 +1,7 @@
 # DataSet-Gen: Evidence-Grounded Document QA Dataset Synthesis
 
+Ref: https://arxiv.org/abs/2601.05163
+
 DataSet-Gen is a document QA dataset generator for **general-domain PDFs**. It builds a minimal document toolkit (`search`/`read`) on top of parsed PDFs, then synthesizes evaluation-oriented QA pairs with strict **evidence grounding**, **uniqueness**, and **difficulty(Multi-Hop)** constraints.
 
 This repo also includes a standalone MinerU parsing service (`mineru/`) and reference scripts for the **LLM-as-a-judge** evaluation phase.

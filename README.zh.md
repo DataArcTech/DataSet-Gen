@@ -1,5 +1,7 @@
 # DataSet-Gen：基于证据的文档 QA 数据合成
 
+参考文献：https://arxiv.org/abs/2601.05163
+
 DataSet-Gen 是一个面向**通用领域 PDF 文档**的 QA 数据集生成工具。它在解析后的文档上构建最小工具集（`search`/`read`），再合成用于评测的问答对，并强调：
 - **证据支持（evidence-grounded）**
 - **唯一性（unique / unambiguous）**
