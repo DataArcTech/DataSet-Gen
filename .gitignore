@@ -1,0 +1,14 @@
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+.env.*
+!.env.example
+.tmp/
+outputs/
+mineru_outputs/
+mineru_temp/
+*.sqlite3
+.DS_Store
