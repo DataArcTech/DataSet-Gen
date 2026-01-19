@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen.add_argument(
         "--read-with-images",
         action="store_true",
-        help="Attach extracted images to the auxiliary reader summaries when available (higher cost).",
+        help="Attach extracted images to the auxiliary reader summaries when available.",
     )
     p_gen.add_argument(
         "--prompt-lang",

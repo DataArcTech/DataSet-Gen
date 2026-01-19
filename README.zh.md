@@ -34,9 +34,11 @@ English README: `README.md`
 
 Python：`>= 3.10`（`python3`）
 
-建议以 editable 模式安装：
+建议先安装依赖；可选再做 editable 安装：
 
 ```bash
+python3 -m pip install -r requirements.txt
+# 可选（安装 `dataset-gen` 命令行入口）
 python3 -m pip install -e .
 ```
 
@@ -58,8 +60,19 @@ cp .env.example .env
 curl http://127.0.0.1:18899/health
 ```
 
+默认多模态配置（可在环境变量中修改）：
+- 图注：默认开启 `content_list_then_llm`（需要配置 OpenAI 兼容的多模态 chat 端点）
+- 图注数量：默认不限制（`MINERU_CAPTION_MAX_IMAGES=0`）
+- 页面截图与块裁剪：默认开启（用于下游 `--read-with-images`）
+
+可配置项（启动前设置环境变量即可）：
+- `MINERU_CAPTION_MODE`: `off|content_list|llm|content_list_then_llm`
+- `MINERU_CAPTION_MAX_IMAGES`: `0` 表示不限制
+- `MINERU_CHAT_API_BASE_URL` / `MINERU_CHAT_API_KEY` / `MINERU_CHAT_MODEL`: 图注所用多模态 chat 端点
+- `MINERU_DUMP_PAGE_SCREENSHOTS=1` / `MINERU_DUMP_BLOCK_CROPS=1` / `MINERU_CROP_IMAGES=1`: 生成页面截图与裁剪块
+
 说明：
-- 服务依赖 FastAPI/uvicorn 等（脚本会提示缺失依赖如何安装）。
+- 服务依赖 FastAPI/uvicorn 等（见 `mineru/requirements.txt`）。
 - 运行环境需要已正确安装并可用的上游 MinerU（CUDA/模型/后端）。详见 `mineru/README.md`。
 - 如果你有独立部署的 MinerU 服务，可设置 `MINERU_SERVER_URL=http://<host>:<port>`。
 

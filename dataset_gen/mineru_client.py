@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import json
 import requests
 from requests import Response
 import os
@@ -75,6 +76,79 @@ class MinerUHttpClient:
         return resp.json()
 
     def parse(self, *, file_path: Path, req: MinerUParseRequest) -> Dict[str, Any]:
+        # Optional fast-path: reuse an already-successful server-side task for the same filename.
+        # This is useful when a previous client run timed out or was interrupted, but the server
+        # kept parsing and finished successfully.
+        if str(os.environ.get("MINERU_CLIENT_REUSE_SUCCESS_TASKS", "0")).lower() in ("1", "true", "yes", "y"):
+            try:
+                info = self.health()
+                out_dir = info.get("output_dir")
+                if isinstance(out_dir, str) and out_dir:
+                    output_root = Path(out_dir).expanduser()
+                    if output_root.exists() and output_root.is_dir():
+                        target_name = file_path.name
+                        want_caption_mode = (req.caption_mode or "").strip()  # "" means "don't care"
+                        require_llm_caps = str(os.environ.get("MINERU_CLIENT_REUSE_REQUIRE_LLM_CAPTIONS", "1")).lower() in (
+                            "1",
+                            "true",
+                            "yes",
+                            "y",
+                        )
+                        # Newer task_ids sort later (timestamp-like). Scan newest first.
+                        for task_root in sorted(
+                            [p for p in output_root.iterdir() if p.is_dir()],
+                            key=lambda p: p.name,
+                            reverse=True,
+                        ):
+                            res_path = task_root / "parse_result.json"
+                            if not res_path.exists():
+                                continue
+                            try:
+                                res = json.loads(res_path.read_text(encoding="utf-8", errors="ignore"))
+                            except Exception:
+                                continue
+                            if not isinstance(res, dict):
+                                continue
+                            if str(res.get("status") or "") != "success":
+                                continue
+                            if str(res.get("original_filename") or "") != target_name:
+                                continue
+                            if want_caption_mode and want_caption_mode != "off":
+                                meta = res.get("metadata") if isinstance(res.get("metadata"), dict) else {}
+                                got_caption_mode = str((meta or {}).get("caption_mode") or "").strip()
+                                # If the caller asks for LLM captioning, do not reuse tasks generated with a different mode.
+                                if got_caption_mode != want_caption_mode:
+                                    continue
+                                # Optional stronger guard: only reuse tasks that actually have LLM captions written,
+                                # otherwise we may keep reusing old "fallback Figure N" runs forever.
+                                if require_llm_caps and want_caption_mode in ("llm", "content_list_then_llm"):
+                                    try:
+                                        man_path = res.get("asset_manifest_path")
+                                        if isinstance(man_path, str) and man_path:
+                                            mp = Path(man_path)
+                                            if mp.exists():
+                                                man = json.loads(mp.read_text(encoding="utf-8", errors="ignore"))
+                                                imgs = man.get("images") if isinstance(man, dict) else None
+                                                if isinstance(imgs, list) and imgs:
+                                                    has_llm = any(
+                                                        isinstance(e, dict) and (e.get("caption_source") == "llm") for e in imgs
+                                                    )
+                                                    if not has_llm:
+                                                        continue
+                                    except Exception:
+                                        # If we cannot validate, fall back to reusing (best-effort).
+                                        pass
+                            reused = dict(res)
+                            reused["_client_parse_mode"] = "reuse_success_task"
+                            reused["_client_wall_time_s"] = 0.0
+                            self._progress(
+                                f"[mineru_client] reuse success task_id={reused.get('task_id')} file={target_name} from output_dir={output_root}"
+                            )
+                            return reused
+            except Exception:
+                # Best-effort only; fall back to normal parsing.
+                pass
+
         data = {
             "backend": req.backend,
             "parse_method": req.parse_method,
@@ -116,16 +190,31 @@ class MinerUHttpClient:
             self._progress(f"[mineru_client] submitted parse_async task_id={task_id} file={file_path.name}")
 
             # Poll until we get a terminal ParseResult.
-            # Use timeout_s as the overall wall-clock budget.
-            deadline = started + float(self.timeout_s)
+            # Heartbeat-based wait:
+            # - Do NOT treat timeout_s as an overall parse budget (large PDFs can take a long time).
+            # - Use timeout_s only as the per-request HTTP timeout.
+            # - Abort only when we haven't observed any successful heartbeat for too long,
+            #   or when an optional max wall-time is configured.
+            stall_timeout_s = float(os.environ.get("MINERU_CLIENT_STALL_TIMEOUT_S", "3600"))
+            max_wall_time_s_raw = os.environ.get("MINERU_CLIENT_MAX_WALL_TIME_S")
+            max_wall_time_s = float(max_wall_time_s_raw) if max_wall_time_s_raw else None
             backoff = 1.0
             last_print = 0.0
+            last_heartbeat = time.perf_counter()
             while True:
                 now = time.perf_counter()
-                if now > deadline:
-                    raise TimeoutError(f"MinerU async parse timed out after {self.timeout_s}s (task_id={task_id})")
+                if max_wall_time_s is not None and (now - started) > max_wall_time_s:
+                    raise TimeoutError(
+                        f"MinerU async parse exceeded max wall time {max_wall_time_s}s (task_id={task_id})"
+                    )
+                if stall_timeout_s > 0 and (now - last_heartbeat) > stall_timeout_s:
+                    raise TimeoutError(
+                        f"MinerU async parse stalled for >{stall_timeout_s}s without heartbeat (task_id={task_id})"
+                    )
                 try:
                     result = self.get_result(task_id)
+                    # Any successful poll is considered a heartbeat.
+                    last_heartbeat = time.perf_counter()
                 except Exception:
                     # Transient network errors: backoff and retry.
                     time.sleep(min(10.0, backoff))

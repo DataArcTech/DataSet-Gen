@@ -936,9 +936,26 @@ def generate_docdancer_items(
 
     store = DocStore(cfg)
     docs = store.list_docs()
-    available = [d for d in doc_ids if d in docs]
+
+    # Only keep docs that have the canonical + index artifacts we need for DocToolkit.
+    available: List[str] = []
+    for did in doc_ids:
+        rec = docs.get(did) if isinstance(docs, dict) else None
+        if not isinstance(rec, dict):
+            continue
+        canon = rec.get("canonical_path")
+        idx = rec.get("index_path")
+        if not (isinstance(canon, str) and canon and Path(canon).exists()):
+            continue
+        if not (isinstance(idx, str) and idx and Path(idx).exists()):
+            continue
+        available.append(did)
+
     if not available:
-        raise RuntimeError("No valid doc_ids provided. Run ingest first.")
+        raise RuntimeError(
+            "No ingested docs available for generation (canonical/index missing). "
+            "Run ingest first and ensure canonical.json + chunks.sqlite3 exist."
+        )
 
     explore_model_final = explore_model or os.environ.get("OPENAI_EXPLORE_MODEL") or "gpt-4o-mini"
     synth_model_final = synth_model or os.environ.get("OPENAI_SYNTH_MODEL") or None

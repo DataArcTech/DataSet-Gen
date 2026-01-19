@@ -1,0 +1,3 @@
+# Core runtime dependencies for DataSet-Gen (MinerU server deps are intentionally excluded).
+requests>=2.0
+

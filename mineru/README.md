@@ -42,6 +42,9 @@ Once the upstream MinerU import works in the same Python environment, this servi
 From the DataSet-Gen repository root:
 
 ```bash
+# Install server deps (upstream MinerU itself is not included).
+python3 -m pip install -r mineru/requirements.txt
+
 # recommended: start on port 18899 (to avoid conflicts with other services)
 ./scripts/start_mineru_server_18899.sh
 curl http://127.0.0.1:18899/health

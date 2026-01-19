@@ -1,0 +1,14 @@
+# MinerU parsing service (standalone) runtime deps.
+# Note: upstream MinerU itself (CUDA/models/backends) is NOT included here.
+
+fastapi
+uvicorn
+python-multipart
+pydantic
+loguru
+requests
+
+# Optional: page screenshots + bbox crops (used by dataset_gen --read-with-images)
+PyMuPDF
+Pillow
+

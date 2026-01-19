@@ -344,16 +344,43 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         )
 
         async def _run_and_persist() -> None:
+            started_at = time.time()
             _write_json(
                 task_root / "status.json",
                 {
                     "task_id": task_id,
                     "status": "processing",
-                    "started_at": time.time(),
+                    "started_at": started_at,
+                    # Heartbeat: client can poll /task/<id>/result and see this update.
+                    "heartbeat_at": started_at,
                     "original_filename": file.filename,
                     "filename": safe_stem,
                 },
             )
+            stop_hb = False
+
+            async def _heartbeat() -> None:
+                # Keep status.json fresh during long parses so clients can distinguish "slow" from "stalled".
+                nonlocal stop_hb
+                while not stop_hb:
+                    try:
+                        _write_json(
+                            task_root / "status.json",
+                            {
+                                "task_id": task_id,
+                                "status": "processing",
+                                "started_at": started_at,
+                                "heartbeat_at": time.time(),
+                                "original_filename": file.filename,
+                                "filename": safe_stem,
+                            },
+                        )
+                    except Exception:
+                        # Best-effort heartbeat.
+                        pass
+                    await asyncio.sleep(20)
+
+            hb_task = asyncio.create_task(_heartbeat())
             try:
                 res = await parse_one(
                     temp_file=temp_file,
@@ -374,6 +401,11 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                     },
                 )
             finally:
+                stop_hb = True
+                try:
+                    hb_task.cancel()
+                except Exception:
+                    pass
                 temp_file.unlink(missing_ok=True)
 
         # Fire-and-forget: long parses won't hold the HTTP connection open.

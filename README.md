@@ -34,6 +34,8 @@ Python: `>= 3.10` (`python3`)
 Install (editable install recommended):
 
 ```bash
+python3 -m pip install -r requirements.txt
+# optional (installs `dataset-gen` entrypoint)
 python3 -m pip install -e .
 ```
 
@@ -55,8 +57,19 @@ Start a local server on port `18899`:
 curl http://127.0.0.1:18899/health
 ```
 
+Default multimodal settings (overridable via environment variables):
+- Captioning: `content_list_then_llm` (requires an OpenAI-compatible multimodal chat endpoint)
+- Caption limit: no limit (`MINERU_CAPTION_MAX_IMAGES=0`)
+- Page screenshots and block crops: enabled (used by downstream `--read-with-images`)
+
+Config knobs (set before starting the server):
+- `MINERU_CAPTION_MODE`: `off|content_list|llm|content_list_then_llm`
+- `MINERU_CAPTION_MAX_IMAGES`: `0` means no limit
+- `MINERU_CHAT_API_BASE_URL` / `MINERU_CHAT_API_KEY` / `MINERU_CHAT_MODEL`: captioning chat endpoint
+- `MINERU_DUMP_PAGE_SCREENSHOTS=1` / `MINERU_DUMP_BLOCK_CROPS=1` / `MINERU_CROP_IMAGES=1`
+
 Notes:
-- The server requires FastAPI deps (e.g. `fastapi`, `uvicorn`, `python-multipart`, `pydantic`, `loguru`).
+- The server requires FastAPI deps (see `mineru/requirements.txt`).
 - The server runtime must have upstream MinerU installed and working (CUDA/models/backends). See `mineru/README.md`.
 - If you already run MinerU elsewhere, set `MINERU_SERVER_URL=http://<host>:<port>`.
 
