@@ -58,6 +58,35 @@ CROP_IMAGES="${MINERU_CROP_IMAGES:-1}"
 
 mkdir -p "$OUTPUT_DIR" "$TEMP_DIR"
 
+# Optional autoscaling of uvicorn workers based on free GPU memory.
+# Note: each worker is a separate process and may load its own GPU-resident models.
+# Tune MINERU_WORKER_VRAM_GB / MINERU_WORKERS_MAX for your environment.
+if [[ "${WORKERS}" == "auto" || "${WORKERS}" == "0" ]]; then
+  WORKERS="$(python3 - <<'PY'
+import os
+import math
+
+workers_max = int(os.environ.get("MINERU_WORKERS_MAX", "4"))
+per_worker_gb = float(os.environ.get("MINERU_WORKER_VRAM_GB", "18"))
+per_worker_gb = max(1.0, per_worker_gb)
+
+def guess() -> int:
+    try:
+        import torch  # type: ignore
+        if not torch.cuda.is_available():
+            return 1
+        free_b, _total_b = torch.cuda.mem_get_info()
+        free_gb = float(free_b) / (1024**3)
+        n = int(math.floor(free_gb / per_worker_gb))
+        return max(1, min(workers_max, n))
+    except Exception:
+        return 1
+
+print(guess())
+PY
+)"
+fi
+
 python3 - <<'PY' >/dev/null
 import importlib
 import sys

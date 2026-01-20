@@ -6,6 +6,7 @@ from dataset_gen.config import AppConfig
 from dataset_gen.env import find_env_file, load_dotenv
 from dataset_gen.generation.heuristic import generate_heuristic_qa
 from dataset_gen.generation.docdancer import generate_docdancer_items, write_items_jsonl
+from dataset_gen.lang import coerce_prompt_lang, detect_prompt_lang
 from dataset_gen.prompts.docdancer import PromptLang
 from dataset_gen.storage.doc_store import DocStore
 
@@ -18,6 +19,7 @@ def generate_qa(
     out_jsonl_path: Path,
     mode: Literal["heuristic", "docdancer"] = "heuristic",
     limit: int = 50,
+    append_n: Optional[int] = None,
     easy_max_ratio: float = 0.10,
     unanswerable_ratio: float = 0.15,
     hard_multi_doc_ratio: float = 0.50,
@@ -37,6 +39,7 @@ def generate_qa(
     hard_require_multimodal: bool = False,
     read_with_images: bool = False,
     prompt_lang: PromptLang = "en",
+    anchor_doc: bool = False,
 ) -> int:
     store = DocStore(cfg)
     if mode == "heuristic":
@@ -58,13 +61,43 @@ def generate_qa(
         if env_path:
             load_dotenv(env_path, override=False)
         selected = doc_ids or [doc_id]
+
+        # Resolve prompt language per (anchor) document if requested.
+        prompt_lang_final: PromptLang
+        if str(prompt_lang) == "auto":
+            try:
+                meta = store.get_doc(doc_id) or {}
+                extra = meta.get("extra") if isinstance(meta, dict) else None
+                stored = (extra.get("doc_language") if isinstance(extra, dict) else None) if extra else None
+                prompt_lang_final = coerce_prompt_lang(stored)
+                if not prompt_lang_final:
+                    raise RuntimeError("empty_lang")
+            except Exception:
+                # Fallback: detect from stored markdown.
+                try:
+                    meta = store.get_doc(doc_id) or {}
+                    md_path = meta.get("mineru_markdown_path")
+                    md = Path(str(md_path)).read_text(encoding="utf-8", errors="ignore") if md_path else ""
+                except Exception:
+                    md = ""
+                prompt_lang_final = detect_prompt_lang(md, "")
+        else:
+            prompt_lang_final = coerce_prompt_lang(str(prompt_lang))
+
         already = 0
-        if resume and out_jsonl_path.exists():
+        if (resume or append_n is not None) and out_jsonl_path.exists():
             try:
                 already = sum(1 for _ in out_jsonl_path.open("r", encoding="utf-8") if _.strip())
             except Exception:
                 already = 0
-        remaining = max(0, int(limit) - int(already))
+
+        if append_n is not None:
+            remaining = max(0, int(append_n))
+            # Always append when using incremental mode.
+            resume = True
+        else:
+            remaining = max(0, int(limit) - int(already))
+
         if remaining <= 0:
             return int(already)
         items = generate_docdancer_items(
@@ -87,7 +120,9 @@ def generate_qa(
             judge_model=judge_model,
             hard_require_multimodal=hard_require_multimodal,
             read_with_images=read_with_images,
-            prompt_lang=prompt_lang,
+            prompt_lang=prompt_lang_final,
+            anchor_doc=bool(anchor_doc),
+            anchor_doc_id=str(doc_id),
         )
         written = write_items_jsonl(items=items, out_jsonl_path=out_jsonl_path, write_debug=write_debug, resume=resume)
         return int(already) + int(written)

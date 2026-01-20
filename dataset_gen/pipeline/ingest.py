@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dataset_gen.config import AppConfig
+from dataset_gen.lang import detect_prompt_lang
 from dataset_gen.mineru_client import MinerUHttpClient, MinerUParseRequest
 from dataset_gen.processing.canonicalize import canonicalize_markdown, write_canonical
 from dataset_gen.storage.doc_store import DocStore
@@ -76,6 +77,41 @@ def ingest_one_or_many(
             # For content_list only, there might be no markdown.
             markdown_path = None
 
+        doc_lang = None
+        if markdown_path is not None and markdown_path.exists():
+            try:
+                md_text = markdown_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                md_text = ""
+            fb_text = ""
+            if content_list_path is not None and content_list_path.exists():
+                try:
+                    import json
+
+                    obj = json.loads(content_list_path.read_text(encoding="utf-8", errors="ignore"))
+                    items = []
+                    if isinstance(obj, list) and obj and isinstance(obj[0], list):
+                        for sub in obj:
+                            if isinstance(sub, list):
+                                items.extend([x for x in sub if isinstance(x, dict)])
+                    elif isinstance(obj, list):
+                        items = [x for x in obj if isinstance(x, dict)]
+                    parts = []
+                    for it in items:
+                        if not isinstance(it, dict):
+                            continue
+                        if str(it.get("type") or "") != "text":
+                            continue
+                        t = it.get("text")
+                        if isinstance(t, str) and t.strip():
+                            parts.append(t.strip())
+                            if sum(len(p) for p in parts) >= 2000:
+                                break
+                    fb_text = "\n".join(parts)
+                except Exception:
+                    fb_text = ""
+            doc_lang = detect_prompt_lang(md_text, fb_text)
+
         canonical_path = cfg.canonical_dir / rec.doc_id / "canonical.json"
         index_path = cfg.indexes_dir / rec.doc_id / "chunks.sqlite3"
 
@@ -110,7 +146,12 @@ def ingest_one_or_many(
             mineru_asset_manifest_path=str(asset_manifest_path) if asset_manifest_path and asset_manifest_path.exists() else None,
             canonical_path=str(canonical_path) if canonical_path.exists() else None,
             index_path=str(index_path) if index_path.exists() else None,
-            extra={"mineru_parse": parse_res, "mineru_url": mineru_url, "output_dir": str(doc_root)},
+            extra={
+                "mineru_parse": parse_res,
+                "mineru_url": mineru_url,
+                "output_dir": str(doc_root),
+                "doc_language": doc_lang,
+            },
         )
 
         results.append(

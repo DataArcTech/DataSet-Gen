@@ -62,7 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen.add_argument("--out", required=True, help="Output JSONL path.")
     p_gen.add_argument("--mode", default="heuristic", choices=["heuristic", "docdancer"])
     p_gen.add_argument("--limit", type=int, default=50)
-    p_gen.add_argument("--easy-max-ratio", type=float, default=0.10, help="Max ratio of easy questions (docdancer).")
+    p_gen.add_argument(
+        "--append-n",
+        type=int,
+        default=None,
+        help="Append exactly N new items (incremental mode). When set, --limit becomes ignored (docdancer).",
+    )
+    p_gen.add_argument("--easy-max-ratio", type=float, default=0.10, help="Ratio of easy questions (docdancer).")
     p_gen.add_argument("--unanswerable-ratio", type=float, default=0.15, help="Ratio of unanswerable questions (docdancer).")
     p_gen.add_argument(
         "--hard-multi-doc-ratio",
@@ -74,13 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--hard-min-evidence-sections",
         type=int,
         default=2,
-        help="For hard items, require at least N distinct evidence sections (docdancer).",
+        help="For hard items, require at least N distinct evidence chunks (docdancer).",
     )
     p_gen.add_argument(
         "--calc-ratio",
         type=float,
         default=0.0,
-        help="Ratio of calc questions (computed via python sandbox). Applied to non-unanswerable items (docdancer).",
+        help="Ratio of calc questions (computed via python sandbox). Calc items are generated as hard (docdancer).",
     )
     p_gen.add_argument(
         "--min-page-gap",
@@ -139,9 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_gen.add_argument(
         "--prompt-lang",
-        default="en",
-        choices=["en", "zh", "zh-Hant"],
-        help="Prompt language for LLM calls (default: en).",
+        default="auto",
+        choices=["auto", "en", "zh", "zh-Hant"],
+        help="Prompt language for LLM calls (default: auto; per-doc detection when available).",
+    )
+    p_gen.add_argument(
+        "--anchor-doc",
+        action="store_true",
+        help="Anchor generation to --doc-id (easy/unanswerable use that doc; hard may add one extra doc for cross-doc).",
     )
 
     p_info = sub.add_parser("info", help="Show ingested document metadata.")
@@ -233,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             out_jsonl_path=out_path,
             mode=args.mode,
             limit=args.limit,
+            append_n=args.append_n,
             easy_max_ratio=args.easy_max_ratio,
             unanswerable_ratio=args.unanswerable_ratio,
             hard_multi_doc_ratio=args.hard_multi_doc_ratio,
@@ -252,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             hard_require_multimodal=args.hard_require_multimodal,
             read_with_images=args.read_with_images,
             prompt_lang=args.prompt_lang,
+            anchor_doc=args.anchor_doc,
         )
         print(json.dumps({"ok": True, "written": str(out_path), "count": generated}, ensure_ascii=False, indent=2))
         return 0

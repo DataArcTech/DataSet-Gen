@@ -134,6 +134,12 @@ class DocToolkit:
         for sid in wanted_sections:
             sec = self._sections_by_id.get(sid)
             chunk_ids_for_section = list(self._chunk_ids_by_section.get(sid) or [])
+            # If the caller provided explicit chunk_ids, treat them as a hard filter so we can
+            # read a single chunk (useful for "easy = single-chunk" constraints).
+            if wanted_chunks:
+                filtered = [c for c in chunk_ids_for_section if c in wanted_chunks]
+                if filtered:
+                    chunk_ids_for_section = filtered
             if not chunk_ids_for_section:
                 # Fallback: if we don't know this section, still try direct chunk reads for that doc.
                 if wanted_chunks:

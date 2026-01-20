@@ -245,6 +245,7 @@ class MultiDocToolkit:
         chunk_ids: Optional[List[str]] = None,
         goal: str,
         max_chars: int = 5000,
+        max_chunks_per_section: int = 8,
     ) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         sec_ids = [str(s).strip() for s in (section_ids or []) if str(s).strip()]
@@ -267,7 +268,13 @@ class MultiDocToolkit:
             tk = self._tks.get(doc_id)
             if not tk:
                 continue
-            rr = tk.read(section_ids=[sid], chunk_ids=cids, goal=goal, max_chars=max_chars)
+            rr = tk.read(
+                section_ids=[sid],
+                chunk_ids=cids,
+                goal=goal,
+                max_chars=max_chars,
+                max_chunks_per_section=int(max_chunks_per_section),
+            )
             for r in rr:
                 images_dir = (self._assets.get(doc_id) or {}).get("images_dir")
                 pages_dir = (self._assets.get(doc_id) or {}).get("pages_dir")
@@ -413,14 +420,27 @@ def _evidence_satisfies(
     hard_min_evidence_sections: int = 2,
 ) -> bool:
     section_evidence = [e for e in evidence if isinstance(e, dict) and e.get("section_id")]
+    chunk_ids: List[str] = []
+    for e in section_evidence:
+        for cid in (e.get("chunk_ids") or []):
+            if isinstance(cid, str) and cid:
+                chunk_ids.append(cid)
+    uniq_chunks = sorted(set(chunk_ids))
+
     if difficulty == "easy":
+        # Easy should be answerable from a single chunk.
+        if uniq_chunks:
+            return len(uniq_chunks) == 1
         return len(section_evidence) >= 1
     if difficulty == "unanswerable":
         # still require at least some attempts / reads.
-        return len(section_evidence) >= 1
+        return bool(uniq_chunks) or len(section_evidence) >= 1
 
     hard_min = max(2, int(hard_min_evidence_sections))
-    if len(section_evidence) < hard_min:
+    # Hard must be multi-hop: require >=N distinct chunks (more robust than "sections" for page-chunked canonicals).
+    if uniq_chunks and len(uniq_chunks) < hard_min:
+        return False
+    if not uniq_chunks and len(section_evidence) < hard_min:
         return False
 
     docs = {e.get("doc_id") for e in section_evidence if e.get("doc_id")}
@@ -476,19 +496,32 @@ def _local_verify_constraints(
 
     section_evidence = [e for e in evidence if isinstance(e, dict) and e.get("section_id")]
     section_ids = [str(e.get("section_id")) for e in section_evidence if e.get("section_id")]
+    chunk_ids: List[str] = []
+    for e in section_evidence:
+        for cid in (e.get("chunk_ids") or []):
+            if isinstance(cid, str) and cid:
+                chunk_ids.append(cid)
+    uniq_chunks = sorted(set(chunk_ids))
     if difficulty == "easy":
-        if len(set(section_ids)) != 1:
+        # "Easy" is single-chunk direct extraction.
+        if uniq_chunks and len(uniq_chunks) != 1:
+            return False, "Easy must use exactly 1 evidence chunk"
+        if not uniq_chunks and len(set(section_ids)) != 1:
             return False, "Easy must use exactly 1 evidence section"
         return True, ""
 
     if difficulty == "unanswerable":
+        if uniq_chunks:
+            return True, ""
         if len(set(section_ids)) < 1:
             return False, "Unanswerable must include at least 1 evidence section (attempted reads)"
         return True, ""
 
     # hard
     hard_min = max(2, int(hard_min_evidence_sections))
-    if len(set(section_ids)) < hard_min:
+    if uniq_chunks and len(uniq_chunks) < hard_min:
+        return False, f"Hard must use >={hard_min} evidence chunks"
+    if not uniq_chunks and len(set(section_ids)) < hard_min:
         return False, f"Hard must use >={hard_min} evidence sections"
     doc_ids = {e.get("doc_id") for e in section_evidence if e.get("doc_id")}
     if require_multi_doc:
@@ -728,12 +761,21 @@ def explore(
                     if h.tool == "search":
                         last_hits = list((h.observation or {}).get("hits") or [])
                         break
-                section_ids = [
-                    x.get("section_id")
-                    for x in last_hits[:3]
-                    if isinstance(x, dict) and x.get("section_id")
-                ]
-                if not section_ids:
+                if difficulty == "easy":
+                    # Easy = single-chunk extraction: prefer reading one specific chunk.
+                    chunk_ids = [
+                        x.get("chunk_id")
+                        for x in last_hits[:1]
+                        if isinstance(x, dict) and x.get("chunk_id")
+                    ]
+                    section_ids = []
+                if not chunk_ids and not section_ids:
+                    section_ids = [
+                        x.get("section_id")
+                        for x in last_hits[:3]
+                        if isinstance(x, dict) and x.get("section_id")
+                    ]
+                if not chunk_ids and not section_ids:
                     chunk_ids = [
                         x.get("chunk_id")
                         for x in last_hits[:3]
@@ -743,7 +785,13 @@ def explore(
             section_ids = [str(s).strip() for s in (section_ids or []) if str(s).strip()]
             chunk_ids = [str(c).strip() for c in (chunk_ids or []) if str(c).strip()]
             goal = str(args.get("goal") or "").strip() or prompts.default_read_goal()
-            reads = toolkit.read(section_ids=section_ids[:3], chunk_ids=chunk_ids[:4], goal=goal, max_chars=4500)
+            reads = toolkit.read(
+                section_ids=section_ids[:3],
+                chunk_ids=chunk_ids[:4],
+                goal=goal,
+                max_chars=4500,
+                max_chunks_per_section=(1 if difficulty == "easy" else 8),
+            )
             summary = (
                 _summarize_reads_for_goal(
                     llm, goal=goal, reads=reads, read_with_images=read_with_images, prompt_lang=prompt_lang
@@ -920,25 +968,32 @@ def generate_docdancer_items(
     hard_require_multimodal: bool = False,
     read_with_images: bool = False,
     prompt_lang: PromptLang = "en",
+    anchor_doc: bool = False,
+    anchor_doc_id: Optional[str] = None,
 ) -> Iterable[GeneratedItem]:
     rnd = random.Random(seed)
 
-    easy_target = int(total * easy_max_ratio)
-    unans_target = int(total * unanswerable_ratio + 0.5)
-    easy_target = min(easy_target, total)
-    unans_target = min(unans_target, total - easy_target)
-    hard_target = total - easy_target - unans_target
-
-    schedule: List[Difficulty] = (
-        (["easy"] * easy_target) + (["unanswerable"] * unans_target) + (["hard"] * hard_target)
-    )
-    rnd.shuffle(schedule)
+    # We model four "types" in output:
+    # - easy (qa): single-chunk, direct extraction
+    # - unanswerable (qa)
+    # - calc (hard): python-sandbox grounded calculation
+    # - hard (qa): multi-hop; can be single-doc (page gap) or cross-doc
+    #
+    # Ratios are applied to total and converted to integer targets.
+    easy_target = int(total * float(easy_max_ratio))
+    unans_target = int(total * float(unanswerable_ratio) + 0.5)
+    calc_target = int(total * float(calc_ratio) + 0.5)
+    easy_target = max(0, min(easy_target, total))
+    unans_target = max(0, min(unans_target, total - easy_target))
+    calc_target = max(0, min(calc_target, total - easy_target - unans_target))
+    hard_target = total - easy_target - unans_target - calc_target
 
     store = DocStore(cfg)
     docs = store.list_docs()
 
     # Only keep docs that have the canonical + index artifacts we need for DocToolkit.
     available: List[str] = []
+    doc_lang: Dict[str, str] = {}
     for did in doc_ids:
         rec = docs.get(did) if isinstance(docs, dict) else None
         if not isinstance(rec, dict):
@@ -950,12 +1005,42 @@ def generate_docdancer_items(
         if not (isinstance(idx, str) and idx and Path(idx).exists()):
             continue
         available.append(did)
+        extra = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
+        lang = str((extra or {}).get("doc_language") or "").strip()
+        if lang:
+            doc_lang[did] = lang
 
     if not available:
         raise RuntimeError(
             "No ingested docs available for generation (canonical/index missing). "
             "Run ingest first and ensure canonical.json + chunks.sqlite3 exist."
         )
+
+    anchor_doc_id_final = (str(anchor_doc_id).strip() if anchor_doc_id else "")
+    anchor_lang = doc_lang.get(anchor_doc_id_final) if anchor_doc_id_final else None
+
+    # For "hard qa" we want a controlled split:
+    # - (1 - hard_multi_doc_ratio): single-doc with page gap constraint
+    # - hard_multi_doc_ratio: cross-doc evidence
+    hard_qa_total = int(hard_target)
+    hard_qa_multi = int(hard_qa_total * float(hard_multi_doc_ratio) + 0.5)
+    hard_qa_multi = max(0, min(hard_qa_multi, hard_qa_total))
+    if len(available) < 2:
+        hard_qa_multi = 0
+    if anchor_doc and anchor_doc_id_final in available and anchor_lang:
+        same_lang = [d for d in available if doc_lang.get(d) == anchor_lang]
+        if len(same_lang) < 2:
+            hard_qa_multi = 0
+    hard_qa_single = hard_qa_total - hard_qa_multi
+
+    schedule: List[Tuple[Difficulty, ItemKind, bool]] = (
+        ([("easy", "qa", False)] * easy_target)
+        + ([("unanswerable", "qa", False)] * unans_target)
+        + ([("hard", "calc", False)] * calc_target)
+        + ([("hard", "qa", False)] * hard_qa_single)
+        + ([("hard", "qa", True)] * hard_qa_multi)
+    )
+    rnd.shuffle(schedule)
 
     explore_model_final = explore_model or os.environ.get("OPENAI_EXPLORE_MODEL") or "gpt-4o-mini"
     synth_model_final = synth_model or os.environ.get("OPENAI_SYNTH_MODEL") or None
@@ -964,15 +1049,33 @@ def generate_docdancer_items(
     judge_model_final = judge_model or os.environ.get("OPENAI_JUDGE_MODEL") or llm_synth.model
     llm_judge = OpenAICompatChatClient.from_env(timeout_s=llm_timeout_s, model=judge_model_final)
 
-    for idx, difficulty in enumerate(schedule, start=1):
+    for idx, (difficulty, kind, require_multi_doc) in enumerate(schedule, start=1):
         # Select documents for this item.
-        require_multi_doc = False
         selected_docs: List[str]
-        if difficulty == "hard" and len(available) >= 2 and rnd.random() < hard_multi_doc_ratio:
-            require_multi_doc = True
-            selected_docs = rnd.sample(available, k=2)
+        if anchor_doc and anchor_doc_id_final and anchor_doc_id_final in available:
+            primary = anchor_doc_id_final
         else:
-            selected_docs = [rnd.choice(available)]
+            primary = rnd.choice(available)
+
+        if require_multi_doc and len(available) >= 2:
+            if anchor_doc and primary in available:
+                other_pool = [d for d in available if d != primary]
+                if anchor_lang:
+                    other_pool = [d for d in other_pool if doc_lang.get(d) == anchor_lang] or other_pool
+                other = rnd.choice(other_pool) if other_pool else primary
+                selected_docs = [primary, other] if other != primary else [primary]
+            else:
+                # Best-effort keep same language when doc languages are known.
+                if doc_lang.get(primary):
+                    same = [d for d in available if d != primary and doc_lang.get(d) == doc_lang.get(primary)]
+                    if same:
+                        selected_docs = [primary, rnd.choice(same)]
+                    else:
+                        selected_docs = rnd.sample(available, k=2)
+                else:
+                    selected_docs = rnd.sample(available, k=2)
+        else:
+            selected_docs = [primary] if (anchor_doc and primary in available) else [rnd.choice(available)]
 
         assets: Dict[str, Dict[str, Any]] = {}
         for did in selected_docs:
@@ -1032,9 +1135,10 @@ def generate_docdancer_items(
                     guided_keywords=guided_keywords,
                     prompt_lang=prompt_lang,
                 )
+                max_reads = 1 if difficulty == "easy" else (5 if difficulty == "hard" else 3)
                 evidence, summaries = _select_evidence_from_trajectory(
                     traj,
-                    max_reads=5 if difficulty == "hard" else 3,
+                    max_reads=max_reads,
                     prefer_multimodal=(difficulty == "hard"),
                 )
                 if summaries:
@@ -1050,11 +1154,13 @@ def generate_docdancer_items(
                     continue
 
                 section_evidence = [e for e in evidence if isinstance(e, dict) and e.get("section_id")]
-                kind: ItemKind = "qa"
                 spec: Dict[str, Any] = {}
                 outcome: Dict[str, Any] = {}
-                if difficulty != "unanswerable" and float(calc_ratio) > 0.0 and rnd.random() < float(calc_ratio):
-                    kind = "calc"
+                if difficulty == "easy" and kind != "qa":
+                    # Safety: easy must be a direct QA item.
+                    continue
+                if difficulty == "unanswerable" and kind != "qa":
+                    continue
 
                 qa: Dict[str, Any]
                 if kind == "calc":

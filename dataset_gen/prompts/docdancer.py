@@ -25,8 +25,11 @@ class DocDancerPrompts:
                 "You may only use two tools: search and read.\n\n"
                 "search: keyword full-text search.\n"
                 "Input JSON: {\"intent\": \"...\", \"tool\": \"search\", \"args\": {\"keywords\": [\"...\", \"...\"]}}\n\n"
-                "read: read a section and extract evidence relevant to a goal.\n"
-                "Input JSON: {\"intent\": \"...\", \"tool\": \"read\", \"args\": {\"section_ids\": [\"...\"], \"goal\": \"...\"}}\n\n"
+                "read: read text evidence by section_ids or chunk_ids, and extract evidence relevant to a goal.\n"
+                "Input JSON: {\"intent\": \"...\", \"tool\": \"read\", \"args\": {\"section_ids\": [\"...\"], \"chunk_ids\": [\"...\"], \"goal\": \"...\"}}\n"
+                "Notes:\n"
+                "- Provide either section_ids or chunk_ids (or both).\n"
+                "- For easy items, prefer reading exactly ONE chunk_id.\n\n"
                 "When you believe evidence is sufficient, finish:\n"
                 "Input JSON: {\"intent\": \"...\", \"tool\": \"finish\", \"args\": {}}\n\n"
                 "Strict requirement: every response must be exactly one JSON object and nothing else."
@@ -35,8 +38,11 @@ class DocDancerPrompts:
                 "你只能使用两个工具：search 和 read。\n\n"
                 "search：关键词全文检索。\n"
                 "输入 JSON：{\"intent\": \"...\", \"tool\": \"search\", \"args\": {\"keywords\": [\"...\", \"...\"]}}\n\n"
-                "read：读取指定 section，并按 goal 抽取证据。\n"
-                "输入 JSON：{\"intent\": \"...\", \"tool\": \"read\", \"args\": {\"section_ids\": [\"...\"], \"goal\": \"...\"}}\n\n"
+                "read：按 section_ids 或 chunk_ids 读取文本，并按 goal 抽取证据。\n"
+                "输入 JSON：{\"intent\": \"...\", \"tool\": \"read\", \"args\": {\"section_ids\": [\"...\"], \"chunk_ids\": [\"...\"], \"goal\": \"...\"}}\n"
+                "说明：\n"
+                "- 你可以只提供 section_ids 或只提供 chunk_ids（也可以都提供）。\n"
+                "- 对于 easy 题，优先只读取 1 个 chunk_id。\n\n"
                 "当你认为证据足够时结束：\n"
                 "输入 JSON：{\"intent\": \"...\", \"tool\": \"finish\", \"args\": {}}\n\n"
                 "严格要求：每次回复必须只包含一个 JSON 对象，不能输出任何额外文本。"
@@ -45,8 +51,11 @@ class DocDancerPrompts:
                 "你只能使用兩個工具：search 和 read。\n\n"
                 "search：關鍵詞全文檢索。\n"
                 "輸入 JSON：{\"intent\": \"...\", \"tool\": \"search\", \"args\": {\"keywords\": [\"...\", \"...\"]}}\n\n"
-                "read：讀取指定 section，並按 goal 抽取證據。\n"
-                "輸入 JSON：{\"intent\": \"...\", \"tool\": \"read\", \"args\": {\"section_ids\": [\"...\"], \"goal\": \"...\"}}\n\n"
+                "read：按 section_ids 或 chunk_ids 讀取文字，並按 goal 抽取證據。\n"
+                "輸入 JSON：{\"intent\": \"...\", \"tool\": \"read\", \"args\": {\"section_ids\": [\"...\"], \"chunk_ids\": [\"...\"], \"goal\": \"...\"}}\n"
+                "說明：\n"
+                "- 你可以只提供 section_ids 或只提供 chunk_ids（也可以都提供）。\n"
+                "- 對於 easy 題，優先只讀取 1 個 chunk_id。\n\n"
                 "當你認為證據足夠時結束：\n"
                 "輸入 JSON：{\"intent\": \"...\", \"tool\": \"finish\", \"args\": {}}\n\n"
                 "嚴格要求：每次回覆必須只包含一個 JSON 物件，不能輸出任何額外文字。"
@@ -95,12 +104,16 @@ class DocDancerPrompts:
     def exploration_intro(self, *, difficulty: str, require_multi_doc: bool, min_page_gap: int) -> str:
         if self.lang == "en":
             if difficulty == "easy":
-                constraints = "- Single-hop allowed: evidence from 1 section is sufficient.\n- Prefer direct extraction questions.\n"
+                constraints = (
+                    "- Single-hop allowed: evidence from 1 chunk is sufficient.\n"
+                    "- Prefer direct extraction questions.\n"
+                    "- Prefer reading exactly ONE chunk_id.\n"
+                )
             elif difficulty == "unanswerable":
                 constraints = "- The goal is an unanswerable question: the documents do not provide a unique answer.\n- Use search/read to attempt answering and confirm the gap/ambiguity.\n"
             else:
                 constraints = (
-                    "- Must be multi-hop: require evidence from at least 2 different sections.\n"
+                    "- Must be multi-hop: require evidence from at least 2 different chunks.\n"
                     + ("- Must be cross-document: evidence from at least 2 documents.\n" if require_multi_doc else f"- Must have a clear span: page gap >= {min_page_gap} within a single document (or obvious section separation).\n")
                     + "- Avoid simple paraphrase or single-location lookup.\n"
                 )
@@ -120,12 +133,12 @@ class DocDancerPrompts:
 
         # zh / zh-Hant
         if difficulty == "easy":
-            constraints = "- 允许单跳：证据来自 1 个 section 即可。\n- 问题应为直接抽取型。\n"
+            constraints = "- 允许单跳：证据来自 1 个 chunk 即可。\n- 问题应为直接抽取型。\n- 优先只读取 1 个 chunk_id。\n"
         elif difficulty == "unanswerable":
             constraints = "- 目标是生成“无法回答”的问题：文档中没有给出唯一答案。\n- 你需要用 search/read 尝试寻找答案，并确认缺失/歧义。\n"
         else:
             constraints = (
-                "- 必须多跳：至少需要 2 个不同 section 的证据才能回答。\n"
+                "- 必须多跳：至少需要 2 个不同 chunk 的证据才能回答。\n"
                 + ("- 必须跨文档：证据来自至少 2 份不同文档。\n" if require_multi_doc else f"- 必须跨跨度：同一文档页跨度至少 {min_page_gap}（或明显章节跨度）。\n")
                 + "- 不能是简单同义复述或单段落定位。\n"
             )
@@ -192,10 +205,10 @@ class DocDancerPrompts:
             if difficulty == "unanswerable":
                 diff = f"- This must be unanswerable. The answer must be exactly: {self.unanswerable_answer()}.\n"
             elif difficulty == "easy":
-                diff = "- Easy: direct extraction; one evidence section is sufficient.\n"
+                diff = "- Easy: direct extraction; one evidence chunk is sufficient.\n"
             else:
                 diff = (
-                    "- Hard: must be multi-hop; require synthesizing at least two evidence sections.\n"
+                    "- Hard: must be multi-hop; require synthesizing at least two evidence chunks.\n"
                     + ("- Evidence must come from at least two different documents.\n" if require_multi_doc else f"- Evidence must have a clear span: page gap >= {min_page_gap} within one document.\n")
                     + "- Keep the answer short (entity/number/phrase/list).\n"
                 )
@@ -214,10 +227,10 @@ class DocDancerPrompts:
         if difficulty == "unanswerable":
             diff = f"- 该题必须不可回答，answer 必须严格为：{self.unanswerable_answer()}。\n"
         elif difficulty == "easy":
-            diff = "- 该题为简单抽取型，可由单一证据直接得到答案。\n"
+            diff = "- 该题为简单抽取型，可由单一 chunk 证据直接得到答案。\n"
         else:
             diff = (
-                "- 该题必须多跳：需要综合至少两条证据才能得到答案。\n"
+                "- 该题必须多跳：需要综合至少两条 chunk 证据才能得到答案。\n"
                 + ("- 证据必须来自至少两份不同文档。\n" if require_multi_doc else f"- 证据必须来自同一文档中跨度明显的两处（页码差至少 {min_page_gap}）。\n")
                 + "- 答案尽量短：实体/数值/短语/列表，避免长段解释。\n"
             )
@@ -241,10 +254,10 @@ class DocDancerPrompts:
                 "- No file/network I/O.\n"
             )
             if difficulty == "easy":
-                diff = "- Easy: allow computing from one evidence section.\n"
+                diff = "- Easy: allow computing from one evidence chunk.\n"
             else:
                 diff = (
-                    "- Hard: must combine information from at least two different evidence sections.\n"
+                    "- Hard: must combine information from at least two different evidence chunks.\n"
                     + ("- Must be cross-document (>=2 doc_id).\n" if require_multi_doc else f"- Must have a clear span: page gap >= {min_page_gap} within one document.\n")
                 )
             return base + diff + "\nEvidence (JSON list):\n" + evidence_json
@@ -263,10 +276,10 @@ class DocDancerPrompts:
             "- 不要在 code 里进行文件/网络 I/O。\n"
         )
         if difficulty == "easy":
-            diff = "- 难度 easy：允许只用 1 个证据 section 中的数字完成计算。\n"
+            diff = "- 难度 easy：允许只用 1 个 chunk 证据中的数字完成计算。\n"
         else:
             diff = (
-                "- 难度 hard：计算必须综合至少两个不同证据 section 的信息。\n"
+                "- 难度 hard：计算必须综合至少两个不同 chunk 证据的信息。\n"
                 + ("- 且证据必须跨文档（至少 2 个 doc_id）。\n" if require_multi_doc else f"- 且证据必须来自同一文档中跨度明显的两处（页码差至少 {min_page_gap}）。\n")
             )
         body_zh = base + diff + "\n证据如下（JSON 列表）：\n" + evidence_json
@@ -300,10 +313,16 @@ class DocDancerPrompts:
                 f"- difficulty={difficulty}",
             ]
             if difficulty == "hard" and require_multi_doc:
-                rules.append(f"- hard must cite >= {int(hard_min_evidence_sections)} distinct evidence section_id.")
+                rules.append(
+                    f"- hard must cite >= {int(hard_min_evidence_sections)} distinct evidence chunk_id "
+                    "(count unique chunk_ids across evidence)."
+                )
                 rules.append("- hard must be cross-document (>=2 distinct doc_id among evidence).")
             if difficulty == "hard" and not require_multi_doc:
-                rules.append(f"- hard must cite >= {int(hard_min_evidence_sections)} distinct evidence section_id.")
+                rules.append(
+                    f"- hard must cite >= {int(hard_min_evidence_sections)} distinct evidence chunk_id "
+                    "(count unique chunk_ids across evidence)."
+                )
                 rules.append(
                     f"- hard single-doc page_gap is defined as page_span = max(page_idxs) - min(page_idxs) across ALL evidence pages; require page_span >= {min_page_gap}.\n"
                     "  Do NOT require every adjacent page gap >= threshold."
@@ -340,10 +359,10 @@ class DocDancerPrompts:
             extra = "如果 evidence 中包含 derived.python_sandbox，则其 result_text 视为确定性的计算结果（用于校验计算题）。\n"
         rules = [f"- difficulty={difficulty}"]
         if difficulty == "hard" and require_multi_doc:
-            rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence section_id。")
+            rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence chunk_id（按 chunk_ids 去重统计）。")
             rules.append("- hard 必须跨文档（证据中至少 2 个不同 doc_id）。")
         if difficulty == "hard" and not require_multi_doc:
-            rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence section_id。")
+            rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence chunk_id（按 chunk_ids 去重统计）。")
             rules.append(
                 f"- hard 单文档页跨度定义为：page_span = max(page_idxs) - min(page_idxs)（跨所有证据页）；要求 page_span >= {min_page_gap}。\n"
                 "  不要求相邻页差都满足阈值。"
