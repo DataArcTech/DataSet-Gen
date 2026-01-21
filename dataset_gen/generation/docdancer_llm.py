@@ -140,8 +140,10 @@ def explore(
     sys = prompts.tool_schema()
     intro = prompts.exploration_intro(difficulty=difficulty, require_multi_doc=require_multi_doc, min_page_gap=min_page_gap)
     outline = toolkit.outline()
+    outline_kw_groups = suggest_keywords_from_outline(outline, max_terms=12)
     history: List[TrajectoryStep] = []
     used_signatures: set[str] = set()
+    no_hit_streak = 0
 
     for step in range(1, max_steps + 1):
         outline_suggestions = suggest_keywords_from_outline(outline) if step == 1 else []
@@ -207,7 +209,12 @@ def explore(
                 fallback = (base[0][0] if base and base[0] else "definition")
                 keywords = [args.get("keyword") or fallback]
             keywords = [str(k).strip() for k in keywords if str(k).strip()]
+            # If the model gets stuck with 0-hit generic keywords, fall back to outline-derived terms
+            # (domain-agnostic and much more likely to exist in the document).
+            if no_hit_streak >= 2 and outline_kw_groups:
+                keywords = list(outline_kw_groups[(step - 1) % len(outline_kw_groups)])
             hits = toolkit.search(keywords=keywords, limit=search_limit)
+            no_hit_streak = (no_hit_streak + 1) if len(hits) == 0 else 0
             obs = {"keywords": keywords, "hits": hits}
             history.append(TrajectoryStep(step=step, intent=intent, tool="search", args={"keywords": keywords}, observation=obs))
             continue
@@ -336,7 +343,13 @@ def synthesize_calc_spec(
 
 
 def select_evidence_from_trajectory(
-    trajectory: List[TrajectoryStep], *, max_reads: int = 4, prefer_multimodal: bool = False
+    trajectory: List[TrajectoryStep],
+    *,
+    max_reads: int = 4,
+    prefer_multimodal: bool = False,
+    difficulty: Difficulty = "easy",
+    require_multi_doc: bool = False,
+    min_page_gap: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     reads: List[Dict[str, Any]] = []
     summaries: List[str] = []
@@ -366,25 +379,75 @@ def select_evidence_from_trajectory(
         s = (step.observation or {}).get("summary_for_goal")
         if isinstance(s, str) and s.strip():
             summaries.append(s.strip())
-    # Keep last N reads; they tend to be most relevant.
-    if not prefer_multimodal:
-        return reads[-max_reads:], summaries[-max_reads:]
-
-    # Prefer a diverse set (multimodal/table/image) while keeping recency.
-    picked: List[Dict[str, Any]] = []
-    seen_sections: set[str] = set()
-
     def is_multimodal(e: Dict[str, Any]) -> bool:
         if e.get("has_table") is True:
             return True
         imgs = e.get("image_urls") or []
         return isinstance(imgs, list) and len(imgs) > 0
 
+    def page_span(evs: List[Dict[str, Any]]) -> int:
+        pages: List[int] = []
+        for e in evs:
+            for p in (e.get("page_idxs") or []):
+                if isinstance(p, int):
+                    pages.append(p)
+        if len(pages) < 2:
+            return 0
+        return int(max(pages) - min(pages))
+
+    # Keep last N reads by default; they tend to be most relevant.
+    if not prefer_multimodal and difficulty != "hard":
+        return reads[-max_reads:], summaries[-max_reads:]
+
+    # Prefer a diverse set (multimodal/table/image) while keeping recency.
+    picked: List[Dict[str, Any]] = []
+    seen_sections: set[str] = set()
+
+    # For hard items, try to pick evidence that better satisfies multi-hop constraints:
+    # - cross-doc: cover >=2 docs if possible
+    # - single-doc: maximize page span (helping min_page_gap)
+    if difficulty == "hard" and reads:
+        if require_multi_doc:
+            by_doc: Dict[str, List[Dict[str, Any]]] = {}
+            for e in reads:
+                did = str(e.get("doc_id") or "").strip()
+                if did:
+                    by_doc.setdefault(did, []).append(e)
+            docs = list(by_doc.keys())
+            if len(docs) >= 2:
+                # Pick one (prefer multimodal) from each of two docs, then fill with recency.
+                a_doc, b_doc = docs[0], docs[1]
+                cand_a = [e for e in reversed(by_doc[a_doc]) if is_multimodal(e)] or list(reversed(by_doc[a_doc]))
+                cand_b = [e for e in reversed(by_doc[b_doc]) if is_multimodal(e)] or list(reversed(by_doc[b_doc]))
+                seed_pair = [cand_a[0], cand_b[0]]
+                for e in seed_pair:
+                    sid = str(e.get("section_id") or "")
+                    if sid and sid not in seen_sections:
+                        picked.append(e)
+                        seen_sections.add(sid)
+        else:
+            # Single-doc hard: if we have multimodal evidence, anchor on it and maximize span with another read.
+            mm = [e for e in reads if is_multimodal(e)]
+            anchor = mm[-1] if mm else reads[-1]
+            best = None
+            best_span = -1
+            for e in reads:
+                span = page_span([anchor, e])
+                if span > best_span:
+                    best_span = span
+                    best = e
+            seed_pair = [anchor] + ([best] if best and best is not anchor else [])
+            for e in seed_pair:
+                sid = str(e.get("section_id") or "")
+                if sid and sid not in seen_sections:
+                    picked.append(e)
+                    seen_sections.add(sid)
+
     for e in reversed(reads):
         sid = str(e.get("section_id") or "")
         if not sid or sid in seen_sections:
             continue
-        if is_multimodal(e):
+        if prefer_multimodal and is_multimodal(e):
             picked.append(e)
             seen_sections.add(sid)
         if len(picked) >= max_reads:

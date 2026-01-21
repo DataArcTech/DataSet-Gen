@@ -33,4 +33,5 @@ class GeneratedItem:
     evidence_chunk_ids: List[str]
     trajectory: List[TrajectoryStep]
     derived: Optional[Dict[str, Any]] = None
-
+    # Extra fields only written to .debug.jsonl (qa jsonl stays clean).
+    debug: Optional[Dict[str, Any]] = None

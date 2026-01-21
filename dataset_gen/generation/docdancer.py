@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -21,11 +22,15 @@ from .docdancer_llm import (
 from .docdancer_toolkit import MultiDocToolkit
 from .docdancer_types import Difficulty, GeneratedItem, ItemKind
 from .docdancer_utils import (
-    ensure_doc_identity_in_question as _ensure_doc_identity_in_question,
     extract_number_tokens as _extract_number_tokens,
     keywords_from_text as _keywords_from_text,
     guess_title_from_filename as _guess_title_from_filename,
     normalize_number_haystack as _normalize_number_haystack,
+    pick_doc_labels_from_evidence as _pick_doc_labels_from_evidence,
+    build_source_hint as _build_source_hint,
+    validate_answer_with_citations as _validate_answer_with_citations,
+    strip_square_citations as _strip_square_citations,
+    repair_answer_with_citations as _repair_answer_with_citations,
 )
 from .docdancer_validation import (
     evidence_satisfies as _evidence_satisfies,
@@ -69,6 +74,11 @@ def generate_docdancer_items(
     anchor_doc_id: Optional[str] = None,
 ) -> Iterable[GeneratedItem]:
     rnd = random.Random(seed)
+    trace = os.environ.get("DOCDANCER_TRACE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _tr(msg: str) -> None:
+        if trace:
+            print(f"[docdancer] {msg}", file=sys.stderr)
 
     # We model four "types" in output:
     # - easy (qa): single-chunk, direct extraction
@@ -225,6 +235,7 @@ def generate_docdancer_items(
         try:
             guided_keywords: Optional[List[str]] = None
             for attempt in range(1, 6):
+                _tr(f"slot={idx}/{len(schedule)} attempt={attempt} difficulty={difficulty} kind={kind} require_multi_doc={require_multi_doc} docs={selected_docs}")
                 traj = explore(
                     llm=llm_explore,
                     toolkit=toolkit,
@@ -238,11 +249,18 @@ def generate_docdancer_items(
                     guided_keywords=guided_keywords,
                     prompt_lang=prompt_lang,
                 )
+                if trace:
+                    n_search = sum(1 for s in traj if getattr(s, "tool", "") == "search")
+                    n_read = sum(1 for s in traj if getattr(s, "tool", "") == "read")
+                    _tr(f"  traj: steps={len(traj)} search={n_search} read={n_read}")
                 max_reads = 1 if difficulty == "easy" else (5 if difficulty == "hard" else 3)
                 evidence, summaries = _select_evidence_from_trajectory(
                     traj,
                     max_reads=max_reads,
                     prefer_multimodal=(difficulty == "hard"),
+                    difficulty=difficulty,
+                    require_multi_doc=require_multi_doc,
+                    min_page_gap=min_page_gap,
                 )
                 if summaries:
                     # Provide higher-level hints without replacing raw evidence.
@@ -254,6 +272,7 @@ def generate_docdancer_items(
                     min_page_gap=min_page_gap,
                     hard_min_evidence_sections=hard_min_evidence_sections,
                 ):
+                    _tr("  reject: evidence_satisfies=false")
                     continue
 
                 section_evidence = [e for e in evidence if isinstance(e, dict) and e.get("section_id")]
@@ -309,14 +328,7 @@ def generate_docdancer_items(
                         answer = str(outcome.get("result_text") or "").strip()
                         if not answer:
                             continue
-                        q2 = _ensure_doc_identity_in_question(
-                            question=str(spec.get("question") or ""),
-                            evidence=evidence,
-                            require_multi_doc=require_multi_doc,
-                            prompt_lang=prompt_lang,
-                        )
-                        spec["question"] = q2
-                        qa = {"question": q2, "answer": answer}
+                        qa = {"question": str(spec.get("question") or ""), "answer": answer}
 
                         ok, reason = _validate_qa(difficulty=difficulty, qa=qa, prompt_lang=prompt_lang)
                         if not ok:
@@ -348,13 +360,8 @@ def generate_docdancer_items(
                             prompt_lang=prompt_lang,
                         )
                     except Exception:
+                        _tr("  reject: synthesize_exception")
                         continue
-                    qa["question"] = _ensure_doc_identity_in_question(
-                        question=str(qa.get("question") or ""),
-                        evidence=evidence,
-                        require_multi_doc=require_multi_doc,
-                        prompt_lang=prompt_lang,
-                    )
                     ok, reason = _local_verify_constraints(
                         kind="qa",
                         difficulty=difficulty,
@@ -367,9 +374,11 @@ def generate_docdancer_items(
                         prompt_lang=prompt_lang,
                     )
                     if not ok:
+                        _tr(f"  reject: local_verify_constraints(before_judge) {reason}")
                         continue
                 if difficulty == "hard" and hard_require_multimodal:
                     if not _has_multimodal_evidence(section_evidence):
+                        _tr("  reject: hard_require_multimodal_no_evidence")
                         continue
                 if verify_with_llm:
                     # For calc items, attach derived computation so the judge can validate determinism/support.
@@ -386,6 +395,57 @@ def generate_docdancer_items(
                                 }
                             }
                         )
+                    # Number evidence entries so the judge can cite as [eid].
+                    numbered: List[Dict[str, Any]] = []
+                    citation_map: List[Dict[str, Any]] = []
+                    eid = 1
+                    for evi in judge_evidence:
+                        if not isinstance(evi, dict):
+                            continue
+                        # Only number readable evidence chunks/sections; derived notes are not citable.
+                        if evi.get("section_id"):
+                            # Prefer chunk-level citations: split one read that spans multiple chunk_ids
+                            # into multiple citable entries (bounded) so the judge can cite [1][2][3].
+                            cids = evi.get("chunk_ids") if isinstance(evi.get("chunk_ids"), list) else []
+                            cids = [str(x) for x in cids if isinstance(x, str) and x.strip()]
+                            if cids:
+                                for cid in cids[: max(1, int(hard_min_evidence_sections))]:
+                                    ee = dict(evi)
+                                    ee["chunk_ids"] = [cid]
+                                    ee["chunk_id"] = cid
+                                    ee["eid"] = eid
+                                    numbered.append(ee)
+                                    citation_map.append(
+                                        {
+                                            "eid": eid,
+                                            "doc_id": ee.get("doc_id"),
+                                            "doc_filename": ee.get("doc_filename"),
+                                            "doc_title": ee.get("doc_title"),
+                                            "section_id": ee.get("section_id"),
+                                            "chunk_ids": [cid],
+                                            "page_idxs": ee.get("page_idxs"),
+                                        }
+                                    )
+                                    eid += 1
+                            else:
+                                ee = dict(evi)
+                                ee["eid"] = eid
+                                numbered.append(ee)
+                                citation_map.append(
+                                    {
+                                        "eid": eid,
+                                        "doc_id": ee.get("doc_id"),
+                                        "doc_filename": ee.get("doc_filename"),
+                                        "doc_title": ee.get("doc_title"),
+                                        "section_id": ee.get("section_id"),
+                                        "chunk_ids": ee.get("chunk_ids"),
+                                        "page_idxs": ee.get("page_idxs"),
+                                    }
+                                )
+                                eid += 1
+                        else:
+                            numbered.append(evi)
+
                     judge_out = judge_item_with_llm(
                         llm_judge,
                         kind=kind,
@@ -393,7 +453,7 @@ def generate_docdancer_items(
                         require_multi_doc=require_multi_doc,
                         min_page_gap=min_page_gap,
                         hard_min_evidence_sections=hard_min_evidence_sections,
-                        evidence=judge_evidence,
+                        evidence=numbered,
                         question=str(qa["question"]),
                         answer=str(qa["answer"]),
                         prompt_lang=prompt_lang,
@@ -405,8 +465,179 @@ def generate_docdancer_items(
                     ):
                         issues_text = " ".join([str(x) for x in (judge_out.get("issues") or [])])
                         guided_keywords = _keywords_from_text(issues_text + " " + str(qa.get("question") or ""), max_terms=10)
+                        _tr(
+                            f"  reject: judge_flags supported={judge_out.get('supported')} unique={judge_out.get('unique')} "
+                            f"difficulty_ok={judge_out.get('difficulty_ok')} issues={judge_out.get('issues')}"
+                        )
                         continue
                     guided_keywords = None
+
+                    # Extract answer_with_citations from judge, retry once if missing/invalid.
+                    allowed = {m.get("eid") for m in citation_map if isinstance(m, dict) and isinstance(m.get("eid"), int)}
+                    allowed_eids = {int(x) for x in allowed if isinstance(x, int)}
+                    if trace and difficulty == "hard":
+                        _tr(f"  cite_pool: allowed_eids={sorted(allowed_eids)} citation_map_n={len(citation_map)}")
+                    awc = judge_out.get("answer_with_citations")
+                    if not isinstance(awc, str):
+                        awc = ""
+                    # Unanswerable requires the exact token in plain QA output; do not force citations there.
+                    if difficulty == "unanswerable":
+                        ok_cit, _ = (True, "")
+                        awc = str(qa.get("answer") or "").strip()
+                    else:
+                        ok_cit, _ = (
+                            _validate_answer_with_citations(answer_with_citations=awc, allowed_eids=allowed_eids)
+                            if allowed_eids
+                            else (False, "no_eids")
+                        )
+                    if (not ok_cit) and allowed_eids:
+                        # Retry with a stronger instruction (judge_prompt already includes rules; this is a backstop).
+                        judge_out2 = judge_item_with_llm(
+                            llm_judge,
+                            kind=kind,
+                            difficulty=difficulty,
+                            require_multi_doc=require_multi_doc,
+                            min_page_gap=min_page_gap,
+                            hard_min_evidence_sections=hard_min_evidence_sections,
+                            evidence=numbered,
+                            question=str(qa["question"]),
+                            answer=str(qa["answer"]),
+                            prompt_lang=prompt_lang,
+                        )
+                        awc2 = judge_out2.get("answer_with_citations") if isinstance(judge_out2, dict) else ""
+                        if isinstance(awc2, str) and awc2.strip():
+                            if difficulty == "unanswerable":
+                                awc = str(qa.get("answer") or "").strip()
+                                ok_cit = True
+                            else:
+                                ok_cit2, _ = _validate_answer_with_citations(answer_with_citations=awc2, allowed_eids=allowed_eids)
+                                if ok_cit2:
+                                    awc = awc2
+                                    ok_cit = True
+                                else:
+                                    # Deterministic formatting repair (debug-only): enforce per-sentence citations.
+                                    awc_fixed = _repair_answer_with_citations(
+                                        answer_text=awc2,
+                                        allowed_eids=allowed_eids,
+                                        citation_map=citation_map,
+                                        difficulty=difficulty,
+                                        require_multi_doc=require_multi_doc,
+                                    )
+                                    ok_fix, _ = _validate_answer_with_citations(
+                                        answer_with_citations=awc_fixed, allowed_eids=allowed_eids
+                                    )
+                                    if ok_fix:
+                                        awc = awc_fixed
+                                        ok_cit = True
+
+                    # If we cannot obtain a valid cited answer, discard and retry; debug citations are required.
+                    if allowed_eids and difficulty != "unanswerable":
+                        ok_final, _ = _validate_answer_with_citations(answer_with_citations=awc, allowed_eids=allowed_eids)
+                        if not ok_final:
+                            awc_fixed = _repair_answer_with_citations(
+                                answer_text=awc,
+                                allowed_eids=allowed_eids,
+                                citation_map=citation_map,
+                                difficulty=difficulty,
+                                require_multi_doc=require_multi_doc,
+                            )
+                            ok_final2, _ = _validate_answer_with_citations(
+                                answer_with_citations=awc_fixed, allowed_eids=allowed_eids
+                            )
+                            if not ok_final2:
+                                _tr("  reject: citations_invalid")
+                                continue
+                            awc = awc_fixed
+                        # Multi-hop: for hard items require multiple distinct citations (minimum 2).
+                        import re as _re
+
+                        cited = {int(x) for x in _re.findall(r"\[(\d+)\]", str(awc))}
+                        if difficulty == "hard":
+                            if len(cited) < 2:
+                                # If the judge keeps reusing the same eid everywhere (still format-valid),
+                                # deterministically spread citations across available eids.
+                                awc_fixed = _repair_answer_with_citations(
+                                    answer_text=awc,
+                                    allowed_eids=allowed_eids,
+                                    citation_map=citation_map,
+                                    difficulty=difficulty,
+                                    require_multi_doc=require_multi_doc,
+                                )
+                                ok_fix, _ = _validate_answer_with_citations(
+                                    answer_with_citations=awc_fixed, allowed_eids=allowed_eids
+                                )
+                                if ok_fix:
+                                    awc = awc_fixed
+                                    cited = {int(x) for x in _re.findall(r"\[(\d+)\]", str(awc))}
+                            if len(cited) < 2:
+                                _tr(f"  reject: hard_requires_2_distinct_citations cited={sorted(cited)}")
+                                continue
+                            if require_multi_doc:
+                                by_eid = {m.get("eid"): m for m in citation_map if isinstance(m, dict) and isinstance(m.get("eid"), int)}
+                                cited_docs = {str(by_eid.get(e, {}).get("doc_id") or "") for e in cited}
+                                cited_docs = {d for d in cited_docs if d}
+                                if len(cited_docs) < 2:
+                                    # Same idea: add missing doc coverage via repair.
+                                    awc_fixed = _repair_answer_with_citations(
+                                        answer_text=awc,
+                                        allowed_eids=allowed_eids,
+                                        citation_map=citation_map,
+                                        difficulty=difficulty,
+                                        require_multi_doc=require_multi_doc,
+                                    )
+                                    ok_fix, _ = _validate_answer_with_citations(
+                                        answer_with_citations=awc_fixed, allowed_eids=allowed_eids
+                                    )
+                                    if ok_fix:
+                                        awc = awc_fixed
+                                        cited = {int(x) for x in _re.findall(r"\[(\d+)\]", str(awc))}
+                                        cited_docs = {str(by_eid.get(e, {}).get("doc_id") or "") for e in cited}
+                                        cited_docs = {d for d in cited_docs if d}
+                                if len(cited_docs) < 2:
+                                    _tr("  reject: hard_crossdoc_requires_2_docs_in_citations")
+                                    continue
+
+                    # Prefer the (possibly rewritten) judged answer as the final clean answer for QA items.
+                    # Keep citations only in debug.
+                    final_answer_plain = str(qa.get("answer") or "").strip()
+                    if kind == "qa" and difficulty != "unanswerable":
+                        final_answer_plain = _strip_square_citations(str(awc))
+                        qa["answer"] = final_answer_plain
+                        ok2, reason2 = _local_verify_constraints(
+                            kind="qa",
+                            difficulty=difficulty,
+                            require_multi_doc=require_multi_doc,
+                            min_page_gap=min_page_gap,
+                            hard_min_evidence_sections=hard_min_evidence_sections,
+                            evidence=evidence,
+                            question=str(qa["question"]),
+                            answer=str(qa["answer"]),
+                            prompt_lang=prompt_lang,
+                        )
+                        if not ok2:
+                            _tr(f"  reject: local_verify_constraints(after_judge) {reason2}")
+                            continue
+
+                    # Attach debug-only info (sources + cited answer + citation map).
+                    labels = _pick_doc_labels_from_evidence(evidence, require_multi_doc=require_multi_doc)
+                    source_hint = _build_source_hint(labels=labels, prompt_lang=prompt_lang)
+                    debug: Dict[str, Any] = {
+                        "source_hint": source_hint,
+                        "citation_map": citation_map,
+                        "answer_with_citations": awc,
+                        "question_len_chars": len(str(qa.get("question") or "").strip()),
+                        "answer_len_chars_plain": len(str(qa.get("answer") or "").strip()),
+                        "answer_len_chars_cited": len(str(awc or "").strip()),
+                    }
+                else:
+                    # Still keep a lightweight source hint in debug when not verifying with LLM.
+                    labels = _pick_doc_labels_from_evidence(evidence, require_multi_doc=require_multi_doc)
+                    source_hint = _build_source_hint(labels=labels, prompt_lang=prompt_lang)
+                    debug = {
+                        "source_hint": source_hint,
+                        "question_len_chars": len(str(qa.get("question") or "").strip()),
+                        "answer_len_chars_plain": len(str(qa.get("answer") or "").strip()),
+                    }
 
                 evidence_section_ids = [str(e.get("section_id")) for e in section_evidence if e.get("section_id")]
                 evidence_chunk_ids: List[str] = []
@@ -435,7 +666,14 @@ def generate_docdancer_items(
                     evidence_chunk_ids=evidence_chunk_ids,
                     trajectory=traj,
                     derived=derived,
+                    debug={
+                        **(debug or {}),
+                        # Preferred debug presentation fields (writer uses these for debug question/answer).
+                        "question": str((debug or {}).get("source_hint") or "").strip() + (" " if (debug or {}).get("source_hint") else "") + str(qa["question"]).strip(),
+                        "answer": (str((debug or {}).get("answer_with_citations") or "").strip() or str(qa["answer"]).strip()),
+                    },
                 )
+                _tr("  accept")
                 break
             else:
                 # give up this slot

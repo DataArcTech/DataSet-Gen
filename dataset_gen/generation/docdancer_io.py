@@ -57,8 +57,11 @@ def write_items_jsonl(
                 f_dbg.write(
                     json.dumps(
                         {
-                            "question": it.question,
-                            "answer": it.answer,
+                            # Keep QA clean in qa.mix.jsonl; debug can have augmented question/answer (sources/citations).
+                            "question_plain": it.question,
+                            "answer_plain": it.answer,
+                            "question": (it.debug or {}).get("question") if isinstance(it.debug, dict) and (it.debug or {}).get("question") else it.question,
+                            "answer": (it.debug or {}).get("answer") if isinstance(it.debug, dict) and (it.debug or {}).get("answer") else it.answer,
                             "difficulty": it.difficulty,
                             "kind": it.kind,
                             "used_doc_ids": it.used_doc_ids,
@@ -66,6 +69,7 @@ def write_items_jsonl(
                             "evidence_chunk_ids": it.evidence_chunk_ids,
                             "trajectory": [asdict(s) for s in it.trajectory],
                             "derived": it.derived,
+                            "debug": it.debug,
                             "created_at": time.time(),
                         },
                         ensure_ascii=False,
@@ -74,4 +78,3 @@ def write_items_jsonl(
                 )
             count += 1
     return count
-

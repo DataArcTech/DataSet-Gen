@@ -212,7 +212,7 @@ class DocDancerPrompts:
                 diff = (
                     "- Hard: must be multi-hop; require synthesizing at least two evidence chunks.\n"
                     + ("- Evidence must come from at least two different documents.\n" if require_multi_doc else f"- Evidence must have a clear span: page gap >= {min_page_gap} within one document.\n")
-                    + "- Keep the answer short (entity/number/phrase/list).\n"
+                    + "- The answer should be sufficiently complete for evaluation and cover all aspects asked, using only the evidence.\n"
                 )
             return base + diff + "\nEvidence (JSON list):\n" + evidence_json
 
@@ -236,7 +236,7 @@ class DocDancerPrompts:
             diff = (
                 "- 该题必须多跳：需要综合至少两条 chunk 证据才能得到答案。\n"
                 + ("- 证据必须来自至少两份不同文档。\n" if require_multi_doc else f"- 证据必须来自同一文档中跨度明显的两处（页码差至少 {min_page_gap}）。\n")
-                + "- 答案尽量短：实体/数值/短语/列表，避免长段解释。\n"
+                + "- 答案应足够完整，覆盖问题所问的要点，并且只能基于证据作答。\n"
             )
         body_zh = base + diff + "\n证据如下（JSON 列表）：\n" + evidence_json
         body_zht = body_zh.replace("证据", "證據").replace("输出", "輸出").replace("必须", "必須").replace("页码", "頁碼")
@@ -328,6 +328,10 @@ class DocDancerPrompts:
                     "(count unique chunk_ids across evidence)."
                 )
                 rules.append("- hard must be cross-document (>=2 distinct doc_id among evidence).")
+                rules.append(
+                    f"- answer_with_citations must cite >= {int(hard_min_evidence_sections)} DISTINCT eid values (no reusing the same eid)."
+                )
+                rules.append("- For cross-document hard: cited eids must come from >=2 distinct doc_id.")
             if difficulty == "hard" and not require_multi_doc:
                 rules.append(
                     f"- hard must cite >= {int(hard_min_evidence_sections)} distinct evidence chunk_id "
@@ -336,6 +340,9 @@ class DocDancerPrompts:
                 rules.append(
                     f"- hard single-doc page_gap is defined as page_span = max(page_idxs) - min(page_idxs) across ALL evidence pages; require page_span >= {min_page_gap}.\n"
                     "  Do NOT require every adjacent page gap >= threshold."
+                )
+                rules.append(
+                    f"- answer_with_citations must cite >= {int(hard_min_evidence_sections)} DISTINCT eid values (no reusing the same eid)."
                 )
             if difficulty == "unanswerable":
                 rules.append(f"- unanswerable answer must be exactly '{self.unanswerable_answer()}'.")
@@ -351,16 +358,32 @@ class DocDancerPrompts:
                 '  \"supported\": boolean,\n'
                 '  \"unique\": boolean,\n'
                 '  \"difficulty_ok\": boolean,\n'
+                '  \"answer_with_citations\": string,\n'
                 '  \"issues\": [string]\n'
                 "}\n\n"
+                "Citation requirements (for answer_with_citations):\n"
+                "- Use ONLY square brackets for citations, e.g. [1]. Do NOT use (), （）, 【】, <sup>, or any other format.\n"
+                "- Inside each [] there must be exactly ONE integer eid. Do NOT output [1,3]; use [1][3].\n"
+                "- Citations MUST appear AFTER the sentence-ending punctuation (not before it).\n"
+                "  Correct: \"...。 [1]\"  Incorrect: \"...[1]。\"\n"
+                "- Append one or more citations to the end of EVERY sentence (after sentence-ending punctuation like .!?; or 。！？；).\n"
+                "- You may cite multiple evidence items by writing multiple brackets: [1][2].\n"
+                "- Evidence entries include an integer field eid that you must cite.\n\n"
                 "Difficulty constraints:\n"
                 + "\n".join(rules)
+                + "\n\nEvaluation policy:\n"
+                "- Treat the provided Answer as a draft. If you rewrite/correct it, judge \"supported/unique/difficulty_ok\" against your final answer_with_citations.\n"
                 + "\n\nEvidence (JSON):\n"
                 + evidence_json
                 + "\n\nQuestion:\n"
                 + question
                 + "\n\nAnswer:\n"
                 + answer
+                + "\n\nNow produce answer_with_citations:\n"
+                "- For unanswerable: output the exact unanswerable token as answer_with_citations, with NO citations.\n"
+                "- For calc: do NOT change any numbers/units from the given Answer; only add citations.\n"
+                "- For qa: treat the given Answer as a DRAFT. You MAY rewrite/expand/correct it to be sufficiently complete and clearly supported by evidence, but do NOT add unsupported claims.\n"
+                "- For hard: ensure the answer actually uses multi-hop evidence and cites >=2 DISTINCT eids (and for cross-doc hard, cited eids must come from >=2 doc_id).\n"
             )
 
         # zh / zh-Hant
@@ -373,12 +396,15 @@ class DocDancerPrompts:
         if difficulty == "hard" and require_multi_doc:
             rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence chunk_id（按 chunk_ids 去重统计）。")
             rules.append("- hard 必须跨文档（证据中至少 2 个不同 doc_id）。")
+            rules.append(f"- answer_with_citations 必须引用至少 {int(hard_min_evidence_sections)} 个不同的 eid（不得重复引用同一个 eid）。")
+            rules.append("- 跨文档 hard：被引用的 eid 必须来自至少 2 个不同 doc_id。")
         if difficulty == "hard" and not require_multi_doc:
             rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence chunk_id（按 chunk_ids 去重统计）。")
             rules.append(
                 f"- hard 单文档页跨度定义为：page_span = max(page_idxs) - min(page_idxs)（跨所有证据页）；要求 page_span >= {min_page_gap}。\n"
                 "  不要求相邻页差都满足阈值。"
             )
+            rules.append(f"- answer_with_citations 必须引用至少 {int(hard_min_evidence_sections)} 个不同的 eid（不得重复引用同一个 eid）。")
         if difficulty == "unanswerable":
             rules.append(f"- unanswerable 的答案必须是“{self.unanswerable_answer()}”。")
         rules.append(
@@ -392,16 +418,32 @@ class DocDancerPrompts:
             '  "supported": boolean,\n'
             '  "unique": boolean,\n'
             '  "difficulty_ok": boolean,\n'
+            '  "answer_with_citations": string,\n'
             '  "issues": [string]\n'
             "}\n\n"
+            "引用要求（用于 answer_with_citations）：\n"
+            "- 只能用英文方括号 [] 做引用，例如 [1]；禁止使用 ()（）、【】、<sup> 等任何其他格式。\n"
+            "- 每个 [] 里只能有一个整数 eid；禁止输出 [1,3]，必须写成 [1][3]。\n"
+            "- 引用必须出现在句末标点之后（不能出现在标点之前）。\n"
+            "  正确：\"...。 [1]\"  错误：\"...[1]。\"\n"
+            "- 必须在每个句号/分号/问号/感叹号等句末标点后追加引用（如 。！？；.!?;）。\n"
+            "- 可以连续追加多个引用：[1][2]。\n"
+            "- 证据条目里包含整数 eid 字段，你只能引用这些 eid。\n\n"
             "难度约束：\n"
             + "\n".join(rules)
+            + "\n\n评审口径：\n"
+            "- 将给定 Answer 视为草稿；如果你进行了改写/纠错，请以你最终输出的 answer_with_citations 为准来判定 supported/unique/difficulty_ok。\n"
             + "\n\n证据（JSON）：\n"
             + evidence_json
             + "\n\n待审问题：\n"
             + question
             + "\n\n待审答案：\n"
             + answer
+            + "\n\n请生成 answer_with_citations：\n"
+            "- unanswerable：answer_with_citations 必须严格等于不可回答标记本身，且不能带任何引用。\n"
+            "- calc：不要改动给定 Answer 中的数字/单位/符号，只追加引用。\n"
+            "- qa：把给定 Answer 视为“草稿”。允许对答案进行改写/补全/纠错，使其足够完整且可由证据支撑，但不得添加证据外的信息。\n"
+            "- hard：必须真正体现多跳综合，并引用至少 2 个不同 eid；跨文档 hard 的引用必须覆盖至少 2 个不同 doc_id。\n"
         )
         body_zht = body_zh.replace("证据", "證據").replace("输出", "輸出").replace("难度", "難度").replace("必须", "必須")
         return body_zh if self.lang == "zh" else body_zht

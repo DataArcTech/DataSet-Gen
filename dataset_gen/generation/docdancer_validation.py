@@ -5,7 +5,6 @@ from dataset_gen.prompts.docdancer import DocDancerPrompts, PromptLang
 from .docdancer_types import Difficulty, ItemKind
 from .docdancer_utils import (
     PROHIBITED_LOC_RE,
-    doc_identity_ok,
     extract_inputs_keys_used,
     extract_number_tokens,
     normalize_number_haystack,
@@ -68,9 +67,6 @@ def validate_qa(*, difficulty: Difficulty, qa: Dict[str, Any], prompt_lang: Prom
         return False, "Contains prohibited location references"
     if "?" not in q and "？" not in q:
         return False, "Question should contain a question mark"
-    # Keep answers short (evaluation-friendly).
-    if difficulty != "unanswerable" and len(a.strip()) > 220:
-        return False, "Answer too long"
     if difficulty == "unanswerable" and a.strip() != unanswerable:
         return False, f"Unanswerable answer must be exactly '{unanswerable}'"
     return True, ""
@@ -142,8 +138,6 @@ def local_verify_constraints(
         return False, "Contains prohibited location references"
     if difficulty == "unanswerable" and answer.strip() != unanswerable:
         return False, f"Unanswerable answer must be exactly '{unanswerable}'"
-    if not doc_identity_ok(question=question, evidence=evidence, require_multi_doc=require_multi_doc):
-        return False, "Question missing explicit document identity (must mention doc_title/doc_filename from evidence)"
 
     # For non-calculation QA, enforce that numeric tokens in the answer appear in evidence
     # (reduces hallucinated numbers/units).
@@ -214,4 +208,3 @@ def has_multimodal_evidence(section_evidence: List[Dict[str, Any]]) -> bool:
         if isinstance(imgs, list) and len(imgs) > 0:
             return True
     return False
-

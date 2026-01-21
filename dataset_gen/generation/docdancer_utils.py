@@ -63,6 +63,12 @@ _TITLE_STOP = {
 
 _KW_TOKEN_RE = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]{2,14}")
 _IDENT_CLEAN_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
+_SENT_END_RE = re.compile(r"[。！？；]|(?<!\d)[.!?;](?!\d)")
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+_OTHER_CITATION_MARK_RE = re.compile(
+    r"(\(\s*\d+\s*\)|（\s*\d+\s*）|【\s*\d+\s*】|<\s*sup\s*>\s*\d+\s*<\s*/\s*sup\s*>)",
+    re.IGNORECASE,
+)
 
 
 def keywords_from_text(text: str, *, max_terms: int = 10) -> List[str]:
@@ -305,3 +311,169 @@ def pick_doc_labels_from_evidence(
         if not require_multi_doc and len(labels) >= 1:
             break
     return labels
+
+
+def build_source_hint(*, labels: List[str], prompt_lang: PromptLang) -> str:
+    if not labels:
+        return ""
+    joined = " + ".join(labels)
+    if prompt_lang == "zh-Hant":
+        return f"（文件：{joined}）"
+    if prompt_lang == "zh":
+        return f"（文件：{joined}）"
+    return f"(Files: {joined})"
+
+
+def validate_answer_with_citations(
+    *,
+    answer_with_citations: str,
+    allowed_eids: set[int],
+) -> tuple[bool, str]:
+    """
+    Validate strict citation format:
+    - Only [] citations are allowed.
+    - Each [] contains exactly one integer eid.
+    - No [1,3] style (enforced by digit-only content).
+    - Every sentence-ending punctuation is immediately followed by one or more citations.
+    """
+    s = str(answer_with_citations or "").strip()
+    if not s:
+        return False, "empty_answer_with_citations"
+    if _OTHER_CITATION_MARK_RE.search(s):
+        return False, "uses_non_square_bracket_citation_mark"
+
+    # Validate each citation token and ensure it references known evidence ids.
+    eids = [int(m.group(1)) for m in _CITATION_RE.finditer(s)]
+    if not eids:
+        return False, "missing_citations"
+    for eid in eids:
+        if eid not in allowed_eids:
+            return False, f"unknown_eid:{eid}"
+
+    # Ensure there are no malformed bracket pairs like [a] or [1 2] etc.
+    # If there is any '[' not part of a valid citation token, reject.
+    stripped = _CITATION_RE.sub("", s)
+    if "[" in stripped or "]" in stripped:
+        return False, "malformed_brackets"
+
+    # Require citations after every sentence-ending punctuation.
+    for m in _SENT_END_RE.finditer(s):
+        tail = s[m.end() :]
+        # Allow whitespace between punctuation and citations, but require at least one [n] next.
+        if not re.match(r"\s*(\[\d+\]\s*)+", tail):
+            return False, "missing_sentence_end_citation"
+
+    return True, ""
+
+
+def strip_square_citations(text: str) -> str:
+    """
+    Remove strict citation tokens like `[123]` from model text.
+    This keeps qa.mix.jsonl clean while retaining traceability in debug.
+    """
+    s = str(text or "")
+    s = _CITATION_RE.sub("", s)
+    # Normalize whitespace created by removals.
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\s+\n", "\n", s)
+    s = re.sub(r"\n\s+", "\n", s)
+    return s.strip()
+
+
+def repair_answer_with_citations(
+    *,
+    answer_text: str,
+    allowed_eids: set[int],
+    citation_map: Optional[List[Dict[str, Any]]] = None,
+    difficulty: str = "easy",
+    require_multi_doc: bool = False,
+) -> str:
+    """
+    Best-effort, deterministic repair:
+    - Remove existing [n] tokens.
+    - Add citations after every sentence-ending punctuation.
+    - Ensure hard has >=2 distinct eids, and cross-doc hard covers >=2 doc_id.
+
+    This is debug-only traceability; qa output remains citation-free.
+    """
+    base = strip_square_citations(str(answer_text or ""))
+    if not base.strip():
+        return str(answer_text or "").strip()
+
+    eids_sorted = sorted({int(e) for e in allowed_eids if isinstance(e, int) and int(e) > 0})
+    if not eids_sorted:
+        return base.strip()
+
+    # Prefer one eid per doc for cross-doc items so we can satisfy the doc coverage constraint.
+    preferred: List[int] = []
+    if require_multi_doc and citation_map:
+        seen_docs: set[str] = set()
+        for m in citation_map:
+            if not isinstance(m, dict):
+                continue
+            eid = m.get("eid")
+            doc_id = str(m.get("doc_id") or "").strip()
+            if not isinstance(eid, int) or eid not in allowed_eids:
+                continue
+            if not doc_id or doc_id in seen_docs:
+                continue
+            seen_docs.add(doc_id)
+            preferred.append(eid)
+        # Keep stable and within allowed pool.
+        preferred = [e for e in preferred if e in allowed_eids]
+
+    use_pool = preferred or eids_sorted
+
+    # For hard items, ensure we have at least two distinct eids available.
+    if str(difficulty) == "hard" and len(use_pool) < 2 and len(eids_sorted) >= 2:
+        use_pool = eids_sorted[:2]
+
+    parts: List[str] = []
+    last = 0
+    sent_i = 0
+    for m in _SENT_END_RE.finditer(base):
+        end = m.end()
+        parts.append(base[last:end])
+        eid = use_pool[sent_i % len(use_pool)]
+        parts.append(f" [{eid}]")
+        last = end
+        sent_i += 1
+    parts.append(base[last:])
+    out = "".join(parts).strip()
+
+    # If there were no sentence-ending punctuations, append citations at the end.
+    if sent_i == 0:
+        eid = use_pool[0]
+        out = (base.strip() + f" [{eid}]").strip()
+
+    # Enforce minimum distinct citations for hard items (>=2).
+    if str(difficulty) == "hard":
+        cited = {int(x) for x in _CITATION_RE.findall(out)}
+        if len(cited) < 2:
+            # Add one more different eid at the end.
+            for eid in eids_sorted:
+                if eid not in cited:
+                    out = (out + f" [{eid}]").strip()
+                    break
+
+        if require_multi_doc and citation_map:
+            by_eid = {m.get("eid"): m for m in citation_map if isinstance(m, dict) and isinstance(m.get("eid"), int)}
+            cited = {int(x) for x in _CITATION_RE.findall(out)}
+            cited_docs = {str(by_eid.get(e, {}).get("doc_id") or "") for e in cited}
+            cited_docs = {d for d in cited_docs if d}
+            if len(cited_docs) < 2:
+                # Add citations from additional docs if possible.
+                for m in citation_map:
+                    if not isinstance(m, dict):
+                        continue
+                    eid = m.get("eid")
+                    doc_id = str(m.get("doc_id") or "").strip()
+                    if not isinstance(eid, int) or eid not in allowed_eids:
+                        continue
+                    if doc_id and doc_id not in cited_docs:
+                        out = (out + f" [{eid}]").strip()
+                        cited_docs.add(doc_id)
+                        if len(cited_docs) >= 2:
+                            break
+
+    return out
