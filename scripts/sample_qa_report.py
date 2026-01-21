@@ -120,7 +120,17 @@ def build_report_item_md(
     doc_store: Dict[str, Dict[str, Any]],
 ) -> str:
     q = str(qa.get("question") or "").strip()
-    a = str(qa.get("answer") or "").strip()
+    a_plain = str(qa.get("answer") or "").strip()
+    a_dbg = str((dbg or {}).get("answer") or "").strip()
+    a_cited = ""
+    dbg_extra = (dbg or {}).get("debug")
+    if isinstance(dbg_extra, dict):
+        v = dbg_extra.get("answer_with_citations")
+        if isinstance(v, str) and v.strip():
+            a_cited = v.strip()
+    if not a_cited:
+        # Fall back: if debug's answer already contains citations, use it.
+        a_cited = a_dbg
 
     difficulty = str((dbg or {}).get("difficulty") or "")
     kind = str((dbg or {}).get("kind") or "")
@@ -134,6 +144,23 @@ def build_report_item_md(
     parts: List[str] = []
     parts.append(f"## Sample {idx}\n")
     parts.append(f"- Difficulty: `{difficulty or 'unknown'}`  Kind: `{kind or 'unknown'}`\n")
+    src_hint = ""
+    qlen = None
+    alen_plain = None
+    alen_cited = None
+    if isinstance((dbg or {}).get("debug"), dict):
+        sh = (dbg or {}).get("debug", {}).get("source_hint")
+        if isinstance(sh, str) and sh.strip():
+            src_hint = sh.strip()
+        qlen = (dbg or {}).get("debug", {}).get("question_len_chars")
+        alen_plain = (dbg or {}).get("debug", {}).get("answer_len_chars_plain")
+        alen_cited = (dbg or {}).get("debug", {}).get("answer_len_chars_cited")
+    if src_hint:
+        parts.append(f"- Source hint (debug): `{src_hint}`\n")
+    if isinstance(qlen, int) or isinstance(alen_plain, int) or isinstance(alen_cited, int):
+        parts.append(
+            f"- Lengths (chars): question={qlen!r} answer_plain={alen_plain!r} answer_cited={alen_cited!r}\n"
+        )
     if doc_labels:
         parts.append("- Source PDF(s):\n")
         for did, label in doc_labels:
@@ -144,7 +171,44 @@ def build_report_item_md(
     parts.append("### Question\n\n")
     parts.append(_md_escape(q) + "\n\n")
     parts.append("### Answer\n\n")
-    parts.append(_md_escape(a) + "\n\n")
+    # Prefer cited answer from debug (for traceability); keep plain answer visible for comparison.
+    if a_cited and a_cited != a_plain:
+        parts.append("Answer (with citations):\n\n")
+        parts.append(_md_escape(a_cited) + "\n\n")
+        parts.append("Answer (plain):\n\n")
+        parts.append(_md_escape(a_plain) + "\n\n")
+    else:
+        parts.append(_md_escape(a_plain) + "\n\n")
+
+    # Citation map (if available)
+    citation_map = None
+    if isinstance((dbg or {}).get("debug"), dict):
+        citation_map = (dbg or {}).get("debug", {}).get("citation_map")
+    if not citation_map and isinstance(dbg, dict):
+        citation_map = dbg.get("citation_map")
+    if isinstance(citation_map, list) and citation_map:
+        parts.append("### Citation Map\n\n")
+        parts.append("| eid | doc_id | doc_filename/title | section_id | chunk_ids | page_idxs |\n")
+        parts.append("|---:|---|---|---|---|---|\n")
+        for m in citation_map[:50]:
+            if not isinstance(m, dict):
+                continue
+            eid = m.get("eid")
+            did = m.get("doc_id")
+            name = m.get("doc_filename") or m.get("doc_title") or ""
+            sid = m.get("section_id") or ""
+            cids = m.get("chunk_ids") or []
+            pidxs = m.get("page_idxs") or []
+            if isinstance(cids, list):
+                cids_s = ",".join([str(x) for x in cids][:6])
+            else:
+                cids_s = str(cids)
+            if isinstance(pidxs, list):
+                pidxs_s = ",".join([str(x) for x in pidxs][:6])
+            else:
+                pidxs_s = str(pidxs)
+            parts.append(f"| {eid} | `{did}` | `{name}` | `{sid}` | `{cids_s}` | `{pidxs_s}` |\n")
+        parts.append("\n")
 
     parts.append("### Evidence IDs\n\n")
     parts.append(f"- evidence_chunk_ids ({len(evidence_chunk_ids)}): `{', '.join([str(x) for x in evidence_chunk_ids])}`\n")
@@ -223,7 +287,7 @@ def main() -> int:
 
     dbg_by_q: Dict[str, Dict[str, Any]] = {}
     for d in _iter_jsonl(dbg_path):
-        q = d.get("question")
+        q = d.get("question_plain") or d.get("question")
         if not isinstance(q, str) or not q.strip():
             continue
         k = _norm_q(q)
@@ -260,4 +324,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
