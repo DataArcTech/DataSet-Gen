@@ -48,7 +48,7 @@ class DocStore:
     def _lock_path(self) -> Path:
         return self.cfg.metadata_path.with_suffix(self.cfg.metadata_path.suffix + ".lock")
 
-    def _with_lock(self):
+    def _with_lock(self, *, shared: bool = False):
         """
         Cross-process lock for doc_store.json updates.
         This allows running multiple `dataset_gen ingest` processes in parallel safely.
@@ -64,7 +64,8 @@ class DocStore:
         class _LockCtx:
             def __enter__(self_nonlocal):
                 self_nonlocal.f = lock_path.open("w")
-                fcntl.flock(self_nonlocal.f.fileno(), fcntl.LOCK_EX)
+                lock_kind = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                fcntl.flock(self_nonlocal.f.fileno(), lock_kind)
                 return self_nonlocal
 
             def __exit__(self_nonlocal, exc_type, exc, tb):
@@ -92,7 +93,7 @@ class DocStore:
         digest = sha256_file(source_pdf)
         doc_id = digest[:16]
         now = time.time()
-        with self._with_lock():
+        with self._with_lock(shared=False):
             data = self._load()
             docs = data.setdefault("docs", {})
             existing = docs.get(doc_id)
@@ -115,7 +116,7 @@ class DocStore:
             return rec
 
     def update_doc(self, doc_id: str, **fields: Any) -> DocRecord:
-        with self._with_lock():
+        with self._with_lock(shared=False):
             data = self._load()
             docs = data.setdefault("docs", {})
             if doc_id not in docs:
@@ -127,7 +128,7 @@ class DocStore:
 
     def get_doc(self, doc_id: str) -> Dict[str, Any]:
         # Best-effort lock: allows consistent reads while parallel ingests are running.
-        with self._with_lock():
+        with self._with_lock(shared=True):
             data = self._load()
             doc = (data.get("docs") or {}).get(doc_id)
             if not doc:
@@ -135,7 +136,7 @@ class DocStore:
             return doc
 
     def list_docs(self) -> Dict[str, Dict[str, Any]]:
-        with self._with_lock():
+        with self._with_lock(shared=True):
             data = self._load()
             docs = data.get("docs") or {}
             if not isinstance(docs, dict):

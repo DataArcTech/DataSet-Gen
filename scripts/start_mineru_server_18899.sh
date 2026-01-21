@@ -41,10 +41,11 @@ fi
 # - caption_max_images: 0 (no limit)
 # Note: LLM captions require a multimodal chat endpoint (base_url/api_key/model).
 CAPTION_MODE="${MINERU_CAPTION_MODE:-content_list_then_llm}" # off|content_list|llm|content_list_then_llm
-CHAT_API_BASE_URL="${MINERU_CHAT_API_BASE_URL:-${OPENAI_BASE_URL:-}}"
-CHAT_API_KEY="${MINERU_CHAT_API_KEY:-${OPENAI_API_KEY:-}}"
+# Allow both "MINERU_CHAT_*" (recommended) and "CHAT_*" (server-native) and fall back to OPENAI_*.
+CHAT_API_BASE_URL="${MINERU_CHAT_API_BASE_URL:-${CHAT_API_BASE_URL:-${OPENAI_BASE_URL:-}}}"
+CHAT_API_KEY="${MINERU_CHAT_API_KEY:-${CHAT_API_KEY:-${OPENAI_API_KEY:-}}}"
 CHAT_API_KEY_FILE="${MINERU_CHAT_API_KEY_FILE:-}"
-CHAT_MODEL="${MINERU_CHAT_MODEL:-${OPENAI_CHAT_MODEL:-}}"
+CHAT_MODEL="${MINERU_CHAT_MODEL:-${CHAT_MODEL:-${OPENAI_CHAT_MODEL:-}}}"
 CHAT_TIMEOUT_S="${MINERU_CHAT_TIMEOUT_S:-60}"
 # <=0 means "no limit" on images to caption with LLM per task.
 CAPTION_MAX_IMAGES="${MINERU_CAPTION_MAX_IMAGES:-0}"

@@ -198,6 +198,8 @@ class DocDancerPrompts:
                 "Hard requirements:\n"
                 "- Output exactly one JSON object with only two fields: question and answer.\n"
                 "- The question must be natural, unambiguous, and ask exactly one thing with a unique answer.\n"
+                "- The question must be self-contained: explicitly name the document/product/entity using evidence metadata (e.g., doc_title/doc_filename) instead of relying on deictic references.\n"
+                "- Do NOT treat section titles (section_title) as document names; section_title is a section within a document.\n"
                 "- The question must be document-grounded (not answerable by common sense).\n"
                 "- Do NOT mention page/chunk/section ids, tools, search, read, or trajectories.\n"
                 "- Do NOT use explicit location markers such as \"page X\", \"Figure X\", \"Table X\"; instead use 1-3 content hints (term, clause name, table header, key phrase).\n"
@@ -220,6 +222,8 @@ class DocDancerPrompts:
             "硬性要求：\n"
             "- 只能输出一个 JSON 对象，且只能包含两个字段：question 和 answer。\n"
             "- question 必须自然、明确、只问一个问题，对应唯一答案。\n"
+            "- question 必须自洽：需要明确写出文档/产品/对象的名称，优先使用证据里的元信息（例如 doc_title/doc_filename），不要依赖“这/该/本”等指代。\n"
+            "- 不要把章节标题（section_title）当作文档名；section_title 只是文档内的一个小节标题。\n"
             "- question 必须高度依赖文档，不能凭常识回答。\n"
             "- question/answer 中不得提及 page/chunk/section id、工具、搜索、阅读、轨迹。\n"
             "- 不要出现“第X页/图X/表X/章节编号”等显式定位信息；请用 1-3 个内容线索引导定位（例如：术语、条款名、表头字段、关键短语）。\n"
@@ -245,6 +249,8 @@ class DocDancerPrompts:
                 "The final answer must come from executing Python code in a sandbox (NOT from mental math).\n\n"
                 "Output must be exactly one JSON object with only three fields: question, inputs, code.\n"
                 "- question: one clear question that depends on evidence.\n"
+                "- question must be self-contained: explicitly name the document/product/entity using evidence metadata (e.g., doc_title/doc_filename), not deictic references.\n"
+                "- Do NOT treat section titles (section_title) as document names; section_title is a section within a document.\n"
                 "- inputs: JSON object of extracted parameters (numbers or strings only).\n"
                 "- code: Python code string that uses INPUTS and sets variable result as the final answer (prefer a string with unit if needed).\n"
                 "Hard constraints:\n"
@@ -268,6 +274,8 @@ class DocDancerPrompts:
             "必须让答案来自 Python 代码沙箱执行结果（而不是你自己心算/估算）。\n\n"
             "输出必须是一个 JSON 对象，且只能包含三个字段：question, inputs, code。\n"
             "- question: 自然语言问题，只问一个问题，且必须依赖证据。\n"
+            "- question 必须自洽：需要明确写出文档/产品/对象的名称，优先使用证据里的元信息（例如 doc_title/doc_filename），不要依赖“这/该/本”等指代。\n"
+            "- 不要把章节标题（section_title）当作文档名；section_title 只是文档内的一个小节标题。\n"
             "- inputs: 你从 evidence 中抽取的输入参数（JSON object），值必须是数字或字符串。\n"
             "- code: Python 代码字符串；只能使用 INPUTS 里的参数；必须设置变量 result 作为最终答案（建议为字符串，包含单位/百分号等）。\n"
             "硬性约束：\n"
@@ -311,6 +319,8 @@ class DocDancerPrompts:
                 extra = "If evidence contains derived.python_sandbox, treat result_text as deterministic computation output for calc items.\n"
             rules = [
                 f"- difficulty={difficulty}",
+                "- question must be self-contained: it must explicitly name the referenced document/product/entity (prefer evidence fields like doc_title/doc_filename); do not rely on deictic references.",
+                "- If the question refers to a \"document\" by name, that name must match evidence doc_title/doc_filename; do NOT accept section_title being presented as a document.",
             ]
             if difficulty == "hard" and require_multi_doc:
                 rules.append(
@@ -358,6 +368,8 @@ class DocDancerPrompts:
         if kind == "calc":
             extra = "如果 evidence 中包含 derived.python_sandbox，则其 result_text 视为确定性的计算结果（用于校验计算题）。\n"
         rules = [f"- difficulty={difficulty}"]
+        rules.append("- question 必须自洽：需要明确写出文档/产品/对象的名称（优先使用证据里的 doc_title/doc_filename），不要依赖“这/该/本”等指代。")
+        rules.append("- 如果 question 声称引用了某“文档/文件”的名称，则该名称必须能与证据中的 doc_title/doc_filename 对上；不接受把 section_title 当作文档名。")
         if difficulty == "hard" and require_multi_doc:
             rules.append(f"- hard 必须引用至少 {int(hard_min_evidence_sections)} 个不同 evidence chunk_id（按 chunk_ids 去重统计）。")
             rules.append("- hard 必须跨文档（证据中至少 2 个不同 doc_id）。")
